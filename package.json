@@ -1,0 +1,79 @@
+{
+  "name": "tokio",
+  "displayName": "Tokio",
+  "description": "Refine coding requests into concise, implementation-ready prompts locally.",
+  "version": "0.5.2",
+  "publisher": "local",
+  "icon": "media/tokio-avatar.png",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "prompt",
+    "productivity",
+    "local",
+    "codex",
+    "claude"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Prompt refinement remains available, but repository context scanning is disabled until the workspace is trusted."
+    },
+    "virtualWorkspaces": {
+      "supported": true
+    }
+  },
+  "activationEvents": [
+    "onView:tokio.view",
+    "onCommand:tokio.focusView"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "tokio.focusView",
+        "title": "Tokio: Focus View"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tokio",
+          "title": "Tokio",
+          "icon": "media/tokio.svg"
+        }
+      ]
+    },
+    "views": {
+      "tokio": [
+        {
+          "id": "tokio.view",
+          "name": "Prompt Refiner",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('out', { recursive: true, force: true })\"",
+    "compile": "tsc -p ./",
+    "check": "tsc -p ./ --noEmit",
+    "build": "npm run clean && npm run compile",
+    "test": "npm run compile && node --test out/core/category.test.js out/core/refine.test.js out/context/discovery.test.js out/ui/messages.test.js out/ui/security.test.js",
+    "verify": "npm run check && npm test && npm run build",
+    "vscode:prepublish": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.7.0"
+  }
+}
