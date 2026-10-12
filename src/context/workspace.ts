@@ -3,12 +3,16 @@ import * as vscode from 'vscode';
 import type { ContextPreview, ContextScope } from '../core/types';
 import {
   countTermHits,
+  extractPathReferences,
   extractRelativeImports,
   extractSearchTerms,
+  findRelatedTests,
   isSafeTextPath,
   rankContextPaths,
+  resolveMentionedPaths,
   type RankSignals
 } from './discovery';
+import { detectConventionFiles, detectValidationCommands } from './project';
 
 const MAX_DISCOVERED_FILES = 500;
 const MAX_READ_BYTES = 32_000;
@@ -65,6 +69,8 @@ export class WorkspaceContextService {
       entry.path !== ARCHITECTURE_PATH && entry.path !== LEGACY_ARCHITECTURE_PATH
     ));
     const known = new Set(candidates.map((entry) => entry.path));
+    const allPaths = new Set(uris.flatMap((uri) => toWorkspacePath(uri) ?? []));
+    const mentionedPaths = resolveMentionedPaths(extractPathReferences(input.rawPrompt), known);
     const changedPaths = await collectChangedPaths(known);
     const openPaths = collectOpenPaths(known);
     const contentHits = await collectContentHits(
@@ -72,11 +78,12 @@ export class WorkspaceContextService {
       extractSearchTerms(input.rawPrompt),
       new Set([...changedPaths, ...openPaths])
     );
-    const signals: RankSignals = { changedPaths, openPaths, contentHits };
+    const signals: RankSignals = { changedPaths, openPaths, contentHits, mentionedPaths };
     const signalSummary = [
       changedPaths.size > 0 ? `${changedPaths.size} changed file(s)` : undefined,
       openPaths.size > 0 ? `${openPaths.size} open tab(s)` : undefined,
-      contentHits.size > 0 ? `${contentHits.size} content match(es)` : undefined
+      contentHits.size > 0 ? `${contentHits.size} content match(es)` : undefined,
+      mentionedPaths.size > 0 ? `${mentionedPaths.size} path(s) named in the prompt` : undefined
     ].filter(Boolean);
     if (signalSummary.length > 0) {
       notices.push(`Ranking also considered ${signalSummary.join(', ')}.`);
@@ -89,6 +96,23 @@ export class WorkspaceContextService {
     if (ranked.length === 0) {
       notices.push('No likely files were found from the task terms; provide a target path for better results.');
     }
+
+    const relatedTests = findRelatedTests(
+      [...(targetEntry ? [targetEntry.path] : []), ...ranked],
+      [...allPaths]
+    ).filter((path) => !ranked.includes(path));
+
+    const rootPaths = new Set([...allPaths].filter((path) => (
+      !path.includes('/') || path === '.github/copilot-instructions.md'
+    )));
+    const conventionFiles = detectConventionFiles(rootPaths);
+    const packageJsonEntry = rootPaths.has('package.json')
+      ? await resolveTargetEntry('package.json', folders)
+      : undefined;
+    const validationCommands = detectValidationCommands({
+      packageJson: packageJsonEntry ? await readSmallTextFile(packageJsonEntry.uri) : undefined,
+      rootPaths
+    });
 
     let architectureNotes: string | undefined;
     if (input.scope === 'architecture') {
@@ -121,6 +145,9 @@ export class WorkspaceContextService {
       scope: input.scope,
       files: ranked,
       architectureNotes,
+      relatedTests,
+      conventionFiles,
+      validationCommands,
       notices,
       inspectedFiles: [...new Set(inspectedFiles)]
     };

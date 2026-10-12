@@ -145,3 +145,41 @@ test('uses compact output by default and keeps it shorter than detailed output',
 function countOccurrences(value: string, search: string): number {
   return value.split(search).length - 1;
 }
+
+test('adds done-when criteria, validation commands, related tests, and conventions only when provided', () => {
+  const result = refinePrompt({
+    rawPrompt: 'Fix the save label.',
+    acceptanceCriteria: '  The label reads Save changes.  ',
+    repositoryContext: {
+      scope: 'targeted',
+      files: ['src/save.ts'],
+      relatedTests: ['src/save.test.ts'],
+      conventionFiles: ['CLAUDE.md'],
+      validationCommands: ['npm run verify', 'npm test']
+    }
+  });
+
+  assert.match(result.refinedPrompt, /Done when:\nThe label reads Save changes\./);
+  assert.match(result.refinedPrompt, /Related tests:\n- src\/save\.test\.ts/);
+  assert.match(result.refinedPrompt, /Follow the conventions in: CLAUDE\.md\./);
+  assert.match(result.refinedPrompt, /Validate with: `npm run verify`, `npm test`$/);
+  assert.doesNotMatch(refinePrompt({ rawPrompt: 'Fix it.' }).refinedPrompt, /Validate with|Done when/);
+});
+
+test('adds secondary category guidance', () => {
+  const result = refinePrompt({ rawPrompt: 'Fix the crash.', category: 'bug', secondaryCategory: 'tests' });
+
+  assert.match(result.refinedPrompt, /Also: Tests — /);
+});
+
+test('renders Claude and Codex target formats without changing the task text', () => {
+  const task = 'Fix the redirect.';
+  const claude = refinePrompt({ rawPrompt: task, target: 'claude', targetPath: 'src/a.ts' }).refinedPrompt;
+  const codex = refinePrompt({ rawPrompt: task, target: 'codex' }).refinedPrompt;
+
+  assert.match(claude, /^<task>\nFix the redirect\.\n<\/task>/);
+  assert.match(claude, /<start_with>\nsrc\/a\.ts\n<\/start_with>/);
+  assert.match(claude, /<constraints>\n- /);
+  assert.match(codex, /^## Task\nFix the redirect\./);
+  assert.match(codex, /## Constraints\n- /);
+});

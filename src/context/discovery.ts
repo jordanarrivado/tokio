@@ -54,12 +54,15 @@ export interface RankSignals {
   changedPaths?: ReadonlySet<string>;
   openPaths?: ReadonlySet<string>;
   contentHits?: ReadonlyMap<string, number>;
+  /** Paths the prompt names directly, for example from a pasted stack trace. */
+  mentionedPaths?: ReadonlySet<string>;
 }
 
 const CHANGED_BOOST = 20;
 const OPEN_BOOST = 10;
 const CONTENT_HIT_BOOST = 10;
 const MAX_CONTENT_BOOST = 30;
+const MENTIONED_BOOST = 60;
 
 /** Counts how many distinct task terms appear in a file's text (case-insensitive). */
 export function countTermHits(content: string, terms: readonly string[]): number {
@@ -137,6 +140,9 @@ function signalScore(path: string, signals: RankSignals): number {
   if (signals.openPaths?.has(path)) {
     score += OPEN_BOOST;
   }
+  if (signals.mentionedPaths?.has(path)) {
+    score += MENTIONED_BOOST;
+  }
   score += Math.min((signals.contentHits?.get(path) ?? 0) * CONTENT_HIT_BOOST, MAX_CONTENT_BOOST);
   return score;
 }
@@ -162,4 +168,88 @@ function normalizeTerm(word: string): string {
 
 function normalizePath(path: string): string {
   return path.replaceAll('\\', '/').replace(/^\.\//, '');
+}
+
+const SOURCE_PATH_REFERENCE = /(?:[A-Za-z]:)?[\w@.\\/-]*[\w-]\.(?:[cm]?[jt]sx?|py|go|rs|java|kt|cs|rb|php|swift|vue|svelte|css|scss|html|sql|json|ya?ml|md)(?=$|[\s:()'"`,;\]])/g;
+
+/** File paths mentioned in the prompt, such as those inside a pasted stack trace. */
+export function extractPathReferences(rawPrompt: string): string[] {
+  const found = new Set<string>();
+  for (const match of rawPrompt.matchAll(SOURCE_PATH_REFERENCE)) {
+    const reference = normalizePath(match[0]).replace(/^[A-Za-z]:/, '').replace(/^\/+/, '');
+    if (reference.includes('/') || reference.includes('.')) {
+      found.add(reference);
+    }
+    if (found.size >= 20) {
+      break;
+    }
+  }
+  return [...found];
+}
+
+/** Maps prompt path references onto known workspace paths (exact or trailing-segment match). */
+export function resolveMentionedPaths(
+  references: readonly string[],
+  knownPaths: Iterable<string>
+): Set<string> {
+  const known = [...knownPaths];
+  const resolved = new Set<string>();
+  for (const reference of references) {
+    const lower = reference.toLowerCase();
+    for (const path of known) {
+      const candidate = path.toLowerCase();
+      if (candidate === lower || candidate.endsWith(`/${lower}`) || lower.endsWith(`/${candidate}`)) {
+        resolved.add(path);
+      }
+    }
+  }
+  return resolved;
+}
+
+const TEST_FILE_PATTERN = /(?:\.(?:test|spec)\.[^./]+$)|(?:^|\/)(?:test_[^/]+\.py|[^/]+_test\.(?:go|py|rs)|[^/]+(?:Test|Tests)\.(?:java|kt|cs))$|(?:^|\/)__tests__\//;
+
+export function isTestPath(path: string): boolean {
+  return TEST_FILE_PATTERN.test(normalizePath(path));
+}
+
+/** Test files that sit next to the given source files, by conventional naming. */
+export function findRelatedTests(
+  sources: readonly string[],
+  allPaths: readonly string[],
+  limit = 3
+): string[] {
+  const tests = allPaths.map(normalizePath).filter(isTestPath);
+  const related: string[] = [];
+
+  for (const source of sources) {
+    const normalized = normalizePath(source);
+    if (isTestPath(normalized)) {
+      continue;
+    }
+    const stem = (normalized.split('/').at(-1) ?? '').replace(/\.[^.]+$/, '').toLowerCase();
+    if (!stem) {
+      continue;
+    }
+    for (const test of tests) {
+      if (extensionFamily(test) !== extensionFamily(normalized)) {
+        continue;
+      }
+      const testStem = (test.split('/').at(-1) ?? '')
+        .replace(/\.(?:test|spec)(?=\.)/i, '')
+        .replace(/\.[^.]+$/, '')
+        .replace(/^test_/i, '')
+        .replace(/_test$/i, '')
+        .replace(/Tests?$/, '')
+        .toLowerCase();
+      if (testStem === stem && !related.includes(test)) {
+        related.push(test);
+      }
+    }
+  }
+  return related.slice(0, limit);
+}
+
+function extensionFamily(path: string): string {
+  const extension = (path.split('/').at(-1) ?? '').split('.').at(-1)?.toLowerCase() ?? '';
+  return ['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs'].includes(extension) ? 'js' : extension;
 }

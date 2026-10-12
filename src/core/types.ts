@@ -1,6 +1,7 @@
 export type Mode = 'minimal' | 'adaptive' | 'strict';
 export type ContextScope = 'none' | 'targeted' | 'architecture';
 export type OutputStyle = 'compact' | 'detailed';
+export type PromptTarget = 'generic' | 'claude' | 'codex';
 export type WorkCategory =
   | 'general'
   | 'bug'
@@ -17,6 +18,12 @@ export interface RepositoryContext {
   scope: Exclude<ContextScope, 'none'>;
   files: string[];
   architectureNotes?: string;
+  /** Test files that sit next to the suggested source files. */
+  relatedTests?: string[];
+  /** Agent instruction files found at the repository root (CLAUDE.md, AGENTS.md, ...). */
+  conventionFiles?: string[];
+  /** Real validation commands detected from project manifests. */
+  validationCommands?: string[];
 }
 
 export interface ContextPreview extends RepositoryContext {
@@ -30,6 +37,9 @@ export interface RefineInput {
   mode?: Mode;
   category?: WorkCategory;
   outputStyle?: OutputStyle;
+  target?: PromptTarget;
+  secondaryCategory?: WorkCategory;
+  acceptanceCriteria?: string;
   repositoryContext?: RepositoryContext;
 }
 

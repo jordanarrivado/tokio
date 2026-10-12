@@ -34,6 +34,7 @@ export class TokioViewProvider implements vscode.WebviewViewProvider {
     }, this.contextService, {
       getActiveFilePath: () => getActiveWorkspaceFilePath(),
       getSelectedText: () => getSelectedEditorText(),
+      getDiagnosticsText: () => getActiveFileDiagnostics(),
       openText: async (text) => {
         const document = await vscode.workspace.openTextDocument({ content: text, language: 'plaintext' });
         await vscode.window.showTextDocument(document, { preview: true });
@@ -52,6 +53,27 @@ function getActiveWorkspaceFilePath(): string | undefined {
     return undefined;
   }
   return vscode.workspace.asRelativePath(uri, false).replaceAll('\\', '/');
+}
+
+const MAX_DIAGNOSTIC_LINES = 10;
+
+function getActiveFileDiagnostics(): string | undefined {
+  const uri = vscode.window.activeTextEditor?.document.uri;
+  if (!uri || !vscode.workspace.getWorkspaceFolder(uri)) {
+    return undefined;
+  }
+
+  const path = vscode.workspace.asRelativePath(uri, false).replaceAll('\\', '/');
+  const lines = vscode.languages.getDiagnostics(uri)
+    .filter((item) => item.severity <= vscode.DiagnosticSeverity.Warning)
+    .sort((left, right) => left.severity - right.severity)
+    .slice(0, MAX_DIAGNOSTIC_LINES)
+    .map((item) => {
+      const level = item.severity === vscode.DiagnosticSeverity.Error ? 'error' : 'warning';
+      const code = item.code !== undefined && typeof item.code !== 'object' ? ` [${item.code}]` : '';
+      return `${path}:${item.range.start.line + 1}:${item.range.start.character + 1} ${level}${code}: ${item.message}`;
+    });
+  return lines.length > 0 ? lines.join('\n') : undefined;
 }
 
 function getSelectedEditorText(): string | undefined {
@@ -75,18 +97,45 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
   <style nonce="${nonce}">
     :root {
       color-scheme: dark;
-      --ts-bg: #1b1c1e;
-      --ts-surface: #0c1b27;
-      --ts-surface-raised: #102330;
-      --ts-input: #0a1823;
-      --ts-border: #29404f;
-      --ts-border-strong: #3a5362;
-      --ts-accent: #10e77a;
-      --ts-accent-hover: #31ef91;
-      --ts-accent-soft: rgba(16, 231, 122, 0.08);
-      --ts-text: #f2f7fb;
-      --ts-muted: #9cafbf;
-      --ts-danger: #ff7180;
+      --ts-bg: #2b2623;
+      --ts-surface: #342e2a;
+      --ts-surface-raised: #3d3631;
+      --ts-input: #272220;
+      --ts-border: #4a4039;
+      --ts-border-strong: #5e5148;
+      --ts-accent: #e0a46a;
+      --ts-accent-hover: #ebb583;
+      --ts-accent-soft: rgba(224, 164, 106, 0.1);
+      --ts-accent-border: rgba(224, 164, 106, 0.35);
+      --ts-text: #f3ebe2;
+      --ts-muted: #b5a698;
+      --ts-placeholder: #8c7e72;
+      --ts-warn: #e6c06f;
+      --ts-danger: #ee8a7c;
+      --ts-shadow: rgba(0, 0, 0, 0.25);
+      --ts-shadow-accent: rgba(224, 164, 106, 0.14);
+    }
+
+    body.vscode-light,
+    body.vscode-high-contrast-light {
+      color-scheme: light;
+      --ts-bg: #faf4ec;
+      --ts-surface: #fffaf3;
+      --ts-surface-raised: #f4eadf;
+      --ts-input: #fffdf9;
+      --ts-border: #e4d6c6;
+      --ts-border-strong: #d3bfa9;
+      --ts-accent: #b8683a;
+      --ts-accent-hover: #a65a2f;
+      --ts-accent-soft: rgba(184, 104, 58, 0.09);
+      --ts-accent-border: rgba(184, 104, 58, 0.35);
+      --ts-text: #3d3128;
+      --ts-muted: #7d6d5f;
+      --ts-placeholder: #a8998a;
+      --ts-warn: #a97a1c;
+      --ts-danger: #b94a3b;
+      --ts-shadow: rgba(90, 60, 30, 0.12);
+      --ts-shadow-accent: rgba(184, 104, 58, 0.16);
     }
 
     * { box-sizing: border-box; }
@@ -120,7 +169,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       border: 1px solid var(--ts-border);
       border-radius: 10px;
       background: var(--ts-input);
-      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+      box-shadow: 0 3px 12px var(--ts-shadow);
     }
 
     .brand-copy { min-width: 0; flex: 1; }
@@ -155,7 +204,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       border: 1px solid var(--ts-border);
       border-radius: 9px;
       background: var(--ts-surface);
-      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+      box-shadow: 0 1px 2px var(--ts-shadow);
     }
 
     .section-title {
@@ -194,8 +243,9 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
     }
 
     textarea { min-height: 132px; resize: vertical; line-height: 1.45; }
+    #acceptance { min-height: 56px; }
     #refined-prompt { min-height: 220px; font-family: var(--vscode-editor-font-family); }
-    textarea::placeholder, input::placeholder { color: #718595; opacity: 1; }
+    textarea::placeholder, input::placeholder { color: var(--ts-placeholder); opacity: 1; }
     select { accent-color: var(--ts-accent); }
 
     textarea:focus,
@@ -246,7 +296,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
     button.ghost:hover:not(:disabled) { border-color: var(--ts-accent); color: var(--ts-accent); background: var(--ts-accent-soft); }
     button.compact { min-height: 28px; padding: 4px 8px; font-size: 0.9em; }
     #selection-button { border-color: var(--ts-accent); color: var(--ts-accent); }
-    .cta { width: 100%; min-height: 38px; box-shadow: 0 4px 14px rgba(16, 231, 122, 0.12); }
+    .cta { width: 100%; min-height: 38px; box-shadow: 0 4px 14px var(--ts-shadow-accent); }
 
     .input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
     .toolbar, .output-actions { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -275,7 +325,26 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
     .detection-badge { border-color: var(--ts-accent); color: var(--ts-accent); background: var(--ts-accent-soft); }
     .confidence-badge { color: var(--ts-muted); }
     .confidence-badge[data-confidence="high"] { border-color: var(--ts-accent); color: var(--ts-accent); }
-    .confidence-badge[data-confidence="medium"] { color: #f3c969; }
+    .confidence-badge[data-confidence="medium"] { color: var(--ts-warn); }
+
+    .analysis {
+      display: grid;
+      gap: 5px;
+      padding: 8px 9px;
+      border: 1px solid var(--ts-border);
+      border-radius: 6px;
+      background: var(--ts-input);
+    }
+
+    .analysis-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; font-weight: 600; }
+    .analysis-level { font-size: 0.82em; font-weight: 600; color: var(--ts-muted); }
+    .analysis-level[data-level="high"] { color: var(--ts-accent); }
+    .analysis-level[data-level="medium"] { color: var(--ts-warn); }
+    .analysis-level[data-level="low"] { color: var(--ts-danger); }
+    .analysis-hints { margin: 0; padding-left: 18px; color: var(--ts-muted); font-size: 0.88em; line-height: 1.45; }
+
+    .history-list { display: grid; gap: 5px; }
+    .history-item { width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
 
     .token-comparison {
       display: grid;
@@ -298,7 +367,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
     .token-metric strong { overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
 
     details.advanced {
-      border: 1px solid rgba(16, 231, 122, 0.3);
+      border: 1px solid var(--ts-accent-border);
       border-radius: 7px;
       padding: 9px;
       background: var(--ts-accent-soft);
@@ -396,6 +465,14 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           <textarea id="raw-prompt" required aria-describedby="raw-hint input-error" placeholder="What should change? Include the pain point, expected behavior, and constraints."></textarea>
           <div class="toolbar" aria-label="Raw prompt tools">
             <button id="selection-button" class="ghost compact" type="button">Use Editor Selection</button>
+            <button id="diagnostics-button" class="ghost compact" type="button">Add Current Errors</button>
+          </div>
+          <div id="analysis" class="analysis" aria-live="polite" hidden>
+            <div class="analysis-head">
+              <span>Prompt clarity</span>
+              <span id="analysis-level" class="analysis-level" data-level="low"></span>
+            </div>
+            <ul id="analysis-hints" class="analysis-hints"></ul>
           </div>
           <p id="raw-hint" class="hint">Original requirements remain verbatim in the refined prompt.</p>
           <p id="input-error" class="error" role="alert" hidden></p>
@@ -431,6 +508,11 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             <button id="active-file-button" class="ghost compact" type="button">Use Active File</button>
           </div>
         </div>
+
+        <div class="field">
+          <label for="acceptance">Done when <span class="hint">optional</span></label>
+          <textarea id="acceptance" rows="2" placeholder="Acceptance criteria, e.g. the form shows an error and the existing tests still pass."></textarea>
+        </div>
       </section>
 
       <section class="card" aria-labelledby="scope-heading">
@@ -456,6 +538,16 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             <option value="detailed">Detailed</option>
           </select>
           <p id="output-style-hint" class="hint">Compact removes repeated guidance while retaining scope and validation.</p>
+        </div>
+
+        <div class="field">
+          <label for="target">Target agent</label>
+          <select id="target" aria-describedby="target-hint">
+            <option value="generic" selected>Generic — plain labels</option>
+            <option value="claude">Claude Code — XML sections</option>
+            <option value="codex">Codex — Markdown headings</option>
+          </select>
+          <p id="target-hint" class="hint">Changes only the section format, not the content.</p>
         </div>
 
         <details id="context-details" class="advanced">
@@ -510,6 +602,13 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           <button id="clear-button" class="ghost" type="button">Clear</button>
         </div>
         <p id="result-status" class="status" role="status" aria-live="polite"></p>
+        <details id="history-details" class="advanced">
+          <summary>History <span id="history-count" class="hint"></span></summary>
+          <div class="advanced-content">
+            <div id="history-list" class="history-list"></div>
+            <button id="history-clear" class="ghost compact" type="button">Clear history</button>
+          </div>
+        </details>
       </section>
 
       <p class="hint footer-note">Everything runs locally. Review, copy, and paste manually into your coding agent.</p>
@@ -523,6 +622,16 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const rawPrompt = document.getElementById('raw-prompt');
       const rawStats = document.getElementById('raw-stats');
       const selectionButton = document.getElementById('selection-button');
+      const diagnosticsButton = document.getElementById('diagnostics-button');
+      const analysisPanel = document.getElementById('analysis');
+      const analysisLevel = document.getElementById('analysis-level');
+      const analysisHints = document.getElementById('analysis-hints');
+      const acceptance = document.getElementById('acceptance');
+      const target = document.getElementById('target');
+      const historyDetails = document.getElementById('history-details');
+      const historyCount = document.getElementById('history-count');
+      const historyList = document.getElementById('history-list');
+      const historyClear = document.getElementById('history-clear');
       const inputToolStatus = document.getElementById('input-tool-status');
       const category = document.getElementById('category');
       const categoryResult = document.getElementById('category-result');
@@ -569,9 +678,15 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       let contextPreview = null;
       let outputRevision = 0;
       let outputRevisionAtRequest = 0;
+      let pendingRawForHistory = '';
+      let history = [];
+      const MAX_HISTORY = 10;
 
       const savedState = vscode.getState();
       if (savedState) {
+        acceptance.value = savedState.acceptance || '';
+        target.value = savedState.target || 'generic';
+        history = Array.isArray(savedState.history) ? savedState.history.slice(0, MAX_HISTORY) : [];
         rawPrompt.value = savedState.rawPrompt || '';
         category.value = savedState.categorySelection || 'auto';
         targetPath.value = savedState.targetPath || '';
@@ -590,8 +705,74 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           mode: mode.value,
           outputStyle: outputStyle.value,
           contextScope: contextScope.value,
-          refinedPrompt: refinedPrompt.value
+          refinedPrompt: refinedPrompt.value,
+          acceptance: acceptance.value,
+          target: target.value,
+          history
         });
+      };
+
+      // Removes a block previously added by "Add Current Errors" so a refresh replaces it.
+      const stripErrorBlock = (text) => text
+        .replace(/(?:^|\\n\\n)Current errors:\\n(?:[^\\n]*:\\d+:\\d+ (?:error|warning)[^\\n]*(?:\\n|$))+/g, '')
+        .trim();
+
+      const renderAnalysis = (analysis) => {
+        analysisHints.replaceChildren();
+        if (!analysis || rawPrompt.value.trim().length === 0) {
+          analysisPanel.hidden = true;
+          return;
+        }
+        analysisLevel.textContent = analysis.level.charAt(0).toUpperCase() + analysis.level.slice(1)
+          + ' · ' + analysis.score + '/100';
+        analysisLevel.dataset.level = analysis.level;
+        analysis.hints.forEach((hint) => {
+          const item = document.createElement('li');
+          item.textContent = hint;
+          analysisHints.appendChild(item);
+        });
+        if (analysis.hints.length === 0) {
+          const item = document.createElement('li');
+          item.textContent = 'No obvious gaps detected.';
+          analysisHints.appendChild(item);
+        }
+        analysisPanel.hidden = false;
+      };
+
+      const renderHistory = () => {
+        historyList.replaceChildren();
+        historyCount.textContent = history.length > 0 ? '(' + history.length + ')' : '';
+        history.forEach((entry) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.className = 'ghost compact history-item';
+          const firstLine = (entry.raw || '').split('\\n')[0].trim();
+          button.textContent = firstLine.length > 60 ? firstLine.slice(0, 57) + '...' : firstLine;
+          button.title = 'Restore this prompt';
+          button.addEventListener('click', () => {
+            rawPrompt.value = entry.raw || '';
+            refinedPrompt.value = entry.refined || '';
+            outputRevision += 1;
+            invalidateContext(true);
+            updateRefineAvailability();
+            updateStats();
+            requestCategoryClassification();
+            resultStatus.textContent = 'Restored from history.';
+            saveState();
+          });
+          historyList.appendChild(button);
+        });
+        if (history.length === 0) {
+          const empty = document.createElement('span');
+          empty.className = 'hint';
+          empty.textContent = 'Refined prompts appear here.';
+          historyList.appendChild(empty);
+        }
+      };
+
+      const addToHistory = (raw, refined) => {
+        history = [{ raw, refined }, ...history.filter((entry) => entry.raw !== raw)].slice(0, MAX_HISTORY);
+        renderHistory();
       };
 
       const updateRefineAvailability = () => {
@@ -673,11 +854,13 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         pendingClassificationRequestId = 0;
         if (category.value !== 'auto') {
           renderCategory();
-          return;
         }
         if (rawPrompt.value.trim().length === 0) {
           pendingClassificationRequestId = 0;
-          renderCategory({ category: 'general', confidence: 'low', matchedSignals: [] });
+          renderAnalysis(undefined);
+          if (category.value === 'auto') {
+            renderCategory({ category: 'general', confidence: 'low', matchedSignals: [] });
+          }
           return;
         }
 
@@ -687,7 +870,8 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           vscode.postMessage({
             type: 'classify',
             requestId: classificationRequestId,
-            rawPrompt: rawPrompt.value
+            rawPrompt: rawPrompt.value,
+            category: category.value === 'auto' ? undefined : category.value
           });
         }, 180);
       };
@@ -796,6 +980,22 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         saveState();
       });
 
+      acceptance.addEventListener('input', () => {
+        saveState();
+      });
+      target.addEventListener('change', saveState);
+
+      diagnosticsButton.addEventListener('click', () => {
+        inputToolStatus.textContent = 'Reading errors and warnings for the active file...';
+        requestEditorTool('diagnostics');
+      });
+
+      historyClear.addEventListener('click', () => {
+        history = [];
+        renderHistory();
+        saveState();
+      });
+
       selectionButton.addEventListener('click', () => {
         inputToolStatus.textContent = 'Reading the current editor selection...';
         requestEditorTool('editorSelection');
@@ -847,6 +1047,8 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         targetPath.value = '';
         mode.value = 'adaptive';
         outputStyle.value = 'compact';
+        target.value = 'generic';
+        acceptance.value = '';
         contextScope.value = 'none';
         contextDetails.open = false;
         refinedPrompt.value = '';
@@ -887,6 +1089,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         requestId += 1;
         pendingRequestId = requestId;
         outputRevisionAtRequest = outputRevision;
+        pendingRawForHistory = rawPrompt.value;
         inputError.hidden = true;
         inputError.textContent = '';
         resultStatus.textContent = 'Refining locally…';
@@ -899,6 +1102,8 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           mode: mode.value,
           category: category.value === 'auto' ? undefined : resolvedCategory,
           outputStyle: outputStyle.value,
+          target: target.value,
+          acceptanceCriteria: acceptance.value.trim() ? acceptance.value : undefined,
           repositoryContext: selectedRepositoryContext()
         });
       });
@@ -917,8 +1122,11 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         }
 
         if (message.type === 'classificationResult') {
-          if (message.requestId === pendingClassificationRequestId && category.value === 'auto') {
-            renderCategory(message.classification);
+          if (message.requestId === pendingClassificationRequestId) {
+            if (category.value === 'auto') {
+              renderCategory(message.classification);
+            }
+            renderAnalysis(message.analysis);
           }
           return;
         }
@@ -928,7 +1136,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             return;
           }
 
-          if (message.tool === 'activeFile' || message.tool === 'editorSelection') {
+          if (message.tool === 'activeFile' || message.tool === 'editorSelection' || message.tool === 'diagnostics') {
             inputToolStatus.textContent = message.message;
           } else {
             resultStatus.textContent = message.message;
@@ -938,6 +1146,22 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             targetPath.value = message.value || '';
             invalidateContext(true);
             updateStats();
+            saveState();
+          }
+
+          if (message.tool === 'diagnostics') {
+            const withoutOldErrors = stripErrorBlock(rawPrompt.value);
+            const removedOldBlock = withoutOldErrors !== rawPrompt.value.trim();
+            rawPrompt.value = message.success
+              ? (withoutOldErrors ? withoutOldErrors + '\\n\\n' : '') + 'Current errors:\\n' + (message.value || '')
+              : withoutOldErrors;
+            if (!message.success && removedOldBlock) {
+              inputToolStatus.textContent = message.message + ' Removed the previous error block.';
+            }
+            invalidateContext(true);
+            updateRefineAvailability();
+            updateStats();
+            requestCategoryClassification();
             saveState();
           }
 
@@ -984,6 +1208,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           }
 
           refinedPrompt.value = message.refinedPrompt;
+          addToHistory(pendingRawForHistory, message.refinedPrompt);
           outputRevision += 1;
           resultStatus.textContent = 'Refined locally. You can edit the result.';
           updateStats();
@@ -1014,6 +1239,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         });
       });
 
+      renderHistory();
       updateRefineAvailability();
       updateModeDescription();
       updateStats();

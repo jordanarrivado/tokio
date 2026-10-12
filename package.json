@@ -2,7 +2,7 @@
   "name": "tokio",
   "displayName": "Tokio",
   "description": "Refine coding requests into concise, implementation-ready prompts locally.",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "publisher": "local",
   "icon": "media/tokio-avatar.png",
   "license": "UNLICENSED",
@@ -31,10 +31,6 @@
       "supported": true
     }
   },
-  "activationEvents": [
-    "onView:tokio.view",
-    "onCommand:tokio.focusView"
-  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -57,7 +53,8 @@
         {
           "id": "tokio.view",
           "name": "Prompt Refiner",
-          "type": "webview"
+          "type": "webview",
+          "icon": "media/tokio.svg"
         }
       ]
     }
@@ -67,7 +64,7 @@
     "compile": "tsc -p ./",
     "check": "tsc -p ./ --noEmit",
     "build": "npm run clean && npm run compile",
-    "test": "npm run compile && node --test out/core/category.test.js out/core/refine.test.js out/context/discovery.test.js out/ui/messages.test.js out/ui/security.test.js",
+    "test": "npm run compile && node --test out/core/category.test.js out/core/refine.test.js out/core/analysis.test.js out/context/discovery.test.js out/context/project.test.js out/ui/messages.test.js out/ui/security.test.js out/tsconfig.test.js",
     "verify": "npm run check && npm test && npm run build",
     "vscode:prepublish": "npm run build"
   },

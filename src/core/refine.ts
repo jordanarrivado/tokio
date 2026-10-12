@@ -1,8 +1,10 @@
-import type { Mode, OutputStyle, RefineInput, RefineOutput, WorkCategory } from './types';
+import type { Mode, OutputStyle, PromptTarget, RefineInput, RefineOutput, WorkCategory } from './types';
 
 const DEFAULT_MODE: Mode = 'adaptive';
 const DEFAULT_CATEGORY: WorkCategory = 'general';
 const DEFAULT_OUTPUT_STYLE: OutputStyle = 'compact';
+const DEFAULT_TARGET: PromptTarget = 'generic';
+const MAX_VALIDATION_COMMANDS = 3;
 
 const CATEGORY_LABELS: Record<WorkCategory, string> = {
   general: 'General',
@@ -87,6 +89,14 @@ const MODE_INSTRUCTIONS: Record<Mode, readonly string[]> = {
   ]
 };
 
+interface Section {
+  /** Rendering used by the generic target; identical to the original plain-text output. */
+  generic: string;
+  tag: string;
+  title: string;
+  body: string;
+}
+
 /**
  * Builds deterministic scope instructions around the user's original task.
  * This function does not interpret, summarize, or semantically rewrite the task.
@@ -101,55 +111,112 @@ export function refinePrompt(input: RefineInput): RefineOutput {
   const mode = input.mode ?? DEFAULT_MODE;
   const category = input.category ?? DEFAULT_CATEGORY;
   const outputStyle = input.outputStyle ?? DEFAULT_OUTPUT_STYLE;
+  const target = input.target ?? DEFAULT_TARGET;
   const targetPath = input.targetPath?.trim();
-  const sections = [`Task:\n${task}`];
+  const sections: Section[] = [{ generic: `Task:\n${task}`, tag: 'task', title: 'Task', body: task }];
 
   if (targetPath) {
-    sections.push(`Start with: ${targetPath}`);
+    sections.push({ generic: `Start with: ${targetPath}`, tag: 'start_with', title: 'Start with', body: targetPath });
   }
 
   const repositoryContext = formatRepositoryContext(input.repositoryContext, targetPath, outputStyle);
   if (repositoryContext) {
-    sections.push(repositoryContext);
+    sections.push({ ...repositoryContext, tag: 'context', title: 'Context' });
   }
 
   const categorySection = formatCategory(category, outputStyle);
   if (categorySection) {
-    sections.push(categorySection);
+    sections.push({ generic: categorySection.text, tag: 'work_type', title: 'Work type', body: categorySection.body });
   }
 
-  sections.push(formatInstructions(mode, outputStyle));
+  const secondary = formatSecondaryCategory(input.secondaryCategory, category);
+  if (secondary) {
+    sections.push({ generic: secondary, tag: 'also', title: 'Also', body: secondary.replace(/^Also: /, '') });
+  }
+
+  const acceptanceCriteria = input.acceptanceCriteria?.trim();
+  if (acceptanceCriteria) {
+    sections.push({
+      generic: `Done when:\n${acceptanceCriteria}`,
+      tag: 'done_when',
+      title: 'Done when',
+      body: acceptanceCriteria
+    });
+  }
+
+  const instructions = formatInstructions(mode, outputStyle);
+  sections.push({
+    generic: instructions.text,
+    tag: 'constraints',
+    title: 'Constraints',
+    body: instructions.body
+  });
+
+  const validation = formatValidation(input.repositoryContext?.validationCommands);
+  if (validation) {
+    sections.push({ generic: validation, tag: 'validate', title: 'Validate', body: validation.replace(/^Validate with: /, '') });
+  }
 
   return {
-    refinedPrompt: sections.join('\n\n'),
+    refinedPrompt: sections.map((section) => renderSection(section, target)).join('\n\n'),
     mode,
     category
   };
 }
 
-function formatCategory(category: WorkCategory, outputStyle: OutputStyle): string | undefined {
+function renderSection(section: Section, target: PromptTarget): string {
+  if (target === 'claude') {
+    return `<${section.tag}>\n${section.body}\n</${section.tag}>`;
+  }
+  if (target === 'codex') {
+    return `## ${section.title}\n${section.body}`;
+  }
+  return section.generic;
+}
+
+function formatCategory(
+  category: WorkCategory,
+  outputStyle: OutputStyle
+): { text: string; body: string } | undefined {
   const instructions = CATEGORY_INSTRUCTIONS[category];
   if (category === 'general') {
     return undefined;
   }
   if (instructions.length === 0) {
-    return outputStyle === 'compact'
+    const label = outputStyle === 'compact'
       ? `Type: ${CATEGORY_LABELS[category]}`
       : `Work type: ${CATEGORY_LABELS[category]}`;
+    return { text: label, body: CATEGORY_LABELS[category] };
   }
   if (outputStyle === 'compact') {
-    return `Type: ${CATEGORY_LABELS[category]} — ${COMPACT_CATEGORY_GUIDANCE[category]}`;
+    const body = `${CATEGORY_LABELS[category]} — ${COMPACT_CATEGORY_GUIDANCE[category]}`;
+    return { text: `Type: ${body}`, body };
   }
-  return `Work type: ${CATEGORY_LABELS[category]}\nCategory guidance:\n${instructions
-    .map((instruction) => `- ${instruction}`)
-    .join('\n')}`;
+  const bullets = instructions.map((instruction) => `- ${instruction}`).join('\n');
+  return {
+    text: `Work type: ${CATEGORY_LABELS[category]}\nCategory guidance:\n${bullets}`,
+    body: `${CATEGORY_LABELS[category]}\n${bullets}`
+  };
+}
+
+function formatSecondaryCategory(
+  secondary: WorkCategory | undefined,
+  primary: WorkCategory
+): string | undefined {
+  if (!secondary || secondary === primary || secondary === 'general' || secondary === 'other') {
+    return undefined;
+  }
+  const guidance = COMPACT_CATEGORY_GUIDANCE[secondary];
+  return guidance
+    ? `Also: ${CATEGORY_LABELS[secondary]} — ${guidance}`
+    : `Also: ${CATEGORY_LABELS[secondary]}`;
 }
 
 function formatRepositoryContext(
   context: RefineInput['repositoryContext'],
   targetPath: string | undefined,
   outputStyle: OutputStyle
-): string | undefined {
+): { generic: string; body: string } | undefined {
   if (!context) {
     return undefined;
   }
@@ -157,29 +224,53 @@ function formatRepositoryContext(
   const uniqueFiles = [...new Set(context.files.map((file) => file.trim()).filter(Boolean))]
     .filter((file) => file !== targetPath)
     .slice(0, 3);
+  const relatedTests = [...new Set((context.relatedTests ?? []).map((file) => file.trim()).filter(Boolean))]
+    .filter((file) => file !== targetPath && !uniqueFiles.includes(file))
+    .slice(0, 3);
+  const conventionFiles = [...new Set((context.conventionFiles ?? []).map((file) => file.trim()).filter(Boolean))]
+    .slice(0, 3);
   const architectureNotes = context.architectureNotes?.trim().slice(0, 1200);
-  const parts = [outputStyle === 'compact'
+  const heading = outputStyle === 'compact'
     ? 'Related files (verify):'
-    : 'Repository context (discovered locally; verify before editing):'];
+    : 'Repository context (discovered locally; verify before editing):';
+  const lines: string[] = [];
 
   if (uniqueFiles.length > 0) {
-    const heading = outputStyle === 'compact' ? '' : 'Suggested starting files:\n';
-    parts.push(`${heading}${uniqueFiles.map((file) => `- ${file}`).join('\n')}`);
+    const filesHeading = outputStyle === 'compact' ? '' : 'Suggested starting files:\n';
+    lines.push(`${filesHeading}${uniqueFiles.map((file) => `- ${file}`).join('\n')}`);
+  }
+
+  if (relatedTests.length > 0) {
+    lines.push(`Related tests:\n${relatedTests.map((file) => `- ${file}`).join('\n')}`);
   }
 
   if (architectureNotes) {
-    parts.push(`Architecture profile (user-maintained reference):\n${architectureNotes}`);
+    lines.push(`Architecture profile (user-maintained reference):\n${architectureNotes}`);
   }
 
-  return parts.length > 1 ? parts.join('\n') : undefined;
+  if (conventionFiles.length > 0) {
+    lines.push(`Follow the conventions in: ${conventionFiles.join(', ')}.`);
+  }
+
+  return lines.length > 0
+    ? { generic: [heading, ...lines].join('\n'), body: lines.join('\n') }
+    : undefined;
 }
 
-function formatInstructions(mode: Mode, outputStyle: OutputStyle): string {
+function formatValidation(commands: readonly string[] | undefined): string | undefined {
+  const unique = [...new Set((commands ?? []).map((command) => command.trim()).filter(Boolean))]
+    .slice(0, MAX_VALIDATION_COMMANDS);
+  return unique.length > 0
+    ? `Validate with: ${unique.map((command) => `\`${command}\``).join(', ')}`
+    : undefined;
+}
+
+function formatInstructions(mode: Mode, outputStyle: OutputStyle): { text: string; body: string } {
   if (outputStyle === 'detailed') {
     const instructions = MODE_INSTRUCTIONS[mode]
       .map((instruction) => `- ${instruction}`)
       .join('\n');
-    return `Instructions:\n${instructions}`;
+    return { text: `Instructions:\n${instructions}`, body: instructions };
   }
 
   const compactInstructions: Record<Mode, readonly string[]> = {
@@ -197,5 +288,6 @@ function formatInstructions(mode: Mode, outputStyle: OutputStyle): string {
       'Validate and report briefly.'
     ]
   };
-  return `Constraints:\n${compactInstructions[mode].map((instruction) => `- ${instruction}`).join('\n')}`;
+  const bullets = compactInstructions[mode].map((instruction) => `- ${instruction}`).join('\n');
+  return { text: `Constraints:\n${bullets}`, body: bullets };
 }

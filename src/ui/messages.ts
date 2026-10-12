@@ -1,6 +1,14 @@
+import { analyzePrompt, type PromptAnalysis } from '../core/analysis';
 import { classifyWorkCategory, type CategoryClassification } from '../core/category';
 import { refinePrompt } from '../core/refine';
-import type { ContextPreview, Mode, OutputStyle, RepositoryContext, WorkCategory } from '../core/types';
+import type {
+  ContextPreview,
+  Mode,
+  OutputStyle,
+  PromptTarget,
+  RepositoryContext,
+  WorkCategory
+} from '../core/types';
 
 export interface ClipboardWriter {
   writeText(text: string): PromiseLike<void>;
@@ -17,6 +25,7 @@ export interface ContextScanner {
 export interface EditorTools {
   getActiveFilePath(): string | undefined;
   getSelectedText(): string | undefined;
+  getDiagnosticsText?(): string | undefined;
   openText(text: string): PromiseLike<void>;
 }
 
@@ -28,6 +37,8 @@ interface RefineRequest {
   mode: Mode;
   category?: WorkCategory;
   outputStyle?: OutputStyle;
+  target?: PromptTarget;
+  acceptanceCriteria?: string;
   repositoryContext?: RepositoryContext;
 }
 
@@ -45,7 +56,7 @@ interface ScanContextRequest {
   scope: 'targeted' | 'architecture';
 }
 
-type ToolName = 'activeFile' | 'editorSelection' | 'openInEditor';
+type ToolName = 'activeFile' | 'editorSelection' | 'diagnostics' | 'openInEditor';
 
 interface ToolRequest {
   type: 'tool';
@@ -58,6 +69,7 @@ interface ClassifyRequest {
   type: 'classify';
   requestId: number;
   rawPrompt: string;
+  category?: WorkCategory;
 }
 
 export type WebviewResponse =
@@ -101,6 +113,7 @@ export type WebviewResponse =
       type: 'classificationResult';
       requestId: number;
       classification: CategoryClassification;
+      analysis: PromptAnalysis;
     };
 
 export async function handleWebviewRequest(
@@ -110,10 +123,12 @@ export async function handleWebviewRequest(
   editorTools?: EditorTools
 ): Promise<WebviewResponse | undefined> {
   if (isClassifyRequest(message)) {
+    const classification = classifyWorkCategory(message.rawPrompt);
     return {
       type: 'classificationResult',
       requestId: message.requestId,
-      classification: classifyWorkCategory(message.rawPrompt)
+      classification,
+      analysis: analyzePrompt(message.rawPrompt, message.category ?? classification.category)
     };
   }
 
@@ -154,13 +169,17 @@ export async function handleWebviewRequest(
   }
 
   try {
-    const category = message.category ?? classifyWorkCategory(message.rawPrompt).category;
+    const classification = classifyWorkCategory(message.rawPrompt);
+    const category = message.category ?? classification.category;
     const result = refinePrompt({
       rawPrompt: message.rawPrompt,
       targetPath: message.targetPath,
       mode: message.mode,
       category,
+      secondaryCategory: message.category ? undefined : classification.secondary,
       outputStyle: message.outputStyle,
+      target: message.target,
+      acceptanceCriteria: message.acceptanceCriteria,
       repositoryContext: message.repositoryContext
     });
     return {
@@ -199,6 +218,13 @@ async function useEditorTool(
     return selection
       ? toolResult(message, true, 'Loaded the current editor selection.', selection)
       : toolResult(message, false, 'Select text in an editor first.');
+  }
+
+  if (message.tool === 'diagnostics') {
+    const diagnostics = editorTools.getDiagnosticsText?.();
+    return diagnostics
+      ? toolResult(message, true, 'Added the current errors and warnings.', diagnostics)
+      : toolResult(message, false, 'No errors or warnings in the active file.');
   }
 
   if (!message.text) {
@@ -272,6 +298,9 @@ function isRefineRequest(message: unknown): message is RefineRequest {
     && isMode(message.mode)
     && (message.category === undefined || isCategory(message.category))
     && (message.outputStyle === undefined || isOutputStyle(message.outputStyle))
+    && (message.target === undefined || isPromptTarget(message.target))
+    && (message.acceptanceCriteria === undefined
+      || (typeof message.acceptanceCriteria === 'string' && message.acceptanceCriteria.length <= 5000))
     && isRepositoryContext(message.repositoryContext);
 }
 
@@ -304,6 +333,7 @@ function isToolRequest(message: unknown): message is ToolRequest {
 
   const validTool = message.tool === 'activeFile'
     || message.tool === 'editorSelection'
+    || message.tool === 'diagnostics'
     || message.tool === 'openInEditor';
   return message.type === 'tool'
     && Number.isSafeInteger(message.requestId)
@@ -316,7 +346,8 @@ function isClassifyRequest(message: unknown): message is ClassifyRequest {
     && message.type === 'classify'
     && Number.isSafeInteger(message.requestId)
     && typeof message.rawPrompt === 'string'
-    && message.rawPrompt.length <= 200_000;
+    && message.rawPrompt.length <= 200_000
+    && (message.category === undefined || isCategory(message.category));
 }
 
 function isRepositoryContext(value: unknown): value is RepositoryContext | undefined {
@@ -331,8 +362,18 @@ function isRepositoryContext(value: unknown): value is RepositoryContext | undef
     || !value.files.every((file) => typeof file === 'string' && file.length <= 1000)) {
     return false;
   }
-  return value.architectureNotes === undefined
-    || (typeof value.architectureNotes === 'string' && value.architectureNotes.length <= 1200);
+  return (value.architectureNotes === undefined
+    || (typeof value.architectureNotes === 'string' && value.architectureNotes.length <= 1200))
+    && isShortStringList(value.relatedTests)
+    && isShortStringList(value.conventionFiles)
+    && isShortStringList(value.validationCommands);
+}
+
+function isShortStringList(value: unknown): boolean {
+  return value === undefined
+    || (Array.isArray(value)
+      && value.length <= 5
+      && value.every((item) => typeof item === 'string' && item.length <= 300));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -354,6 +395,10 @@ function isCategory(category: unknown): category is WorkCategory {
     || category === 'documentation'
     || category === 'investigation'
     || category === 'other';
+}
+
+function isPromptTarget(value: unknown): value is PromptTarget {
+  return value === 'generic' || value === 'claude' || value === 'codex';
 }
 
 function isOutputStyle(value: unknown): value is OutputStyle {

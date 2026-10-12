@@ -6,6 +6,8 @@ export interface CategoryClassification {
   category: WorkCategory;
   confidence: ClassificationConfidence;
   matchedSignals: string[];
+  /** A second, clearly present category (for example a bug fix that also needs tests). */
+  secondary?: WorkCategory;
 }
 
 interface Signal {
@@ -57,14 +59,19 @@ const SIGNALS: Record<Exclude<WorkCategory, 'general' | 'other'>, readonly Signa
   ]
 };
 
+const NEGATED_PHRASE = /\b(?:don'?t|do\s+not|never|avoid|no\s+need\s+to)\s+(?:\w+\s+){0,2}\w+/gi;
+const SECONDARY_MIN_SCORE = 4;
+
 export function classifyWorkCategory(rawPrompt: string): CategoryClassification {
+  // "Don't refactor" must not read as a refactor request.
+  const text = rawPrompt.replace(NEGATED_PHRASE, ' ');
   const scores = new Map<WorkCategory, { score: number; signals: string[] }>();
 
   for (const [category, signals] of Object.entries(SIGNALS) as [WorkCategory, readonly Signal[]][]) {
     let score = 0;
     const matchedSignals: string[] = [];
     for (const candidate of signals) {
-      if (candidate.pattern.test(rawPrompt)) {
+      if (candidate.pattern.test(text)) {
         score += candidate.weight;
         matchedSignals.push(candidate.label);
       }
@@ -86,7 +93,11 @@ export function classifyWorkCategory(rawPrompt: string): CategoryClassification 
   const confidence: ClassificationConfidence = best.score >= 5 && margin >= 3
     ? 'high'
     : 'medium';
-  return { category: bestCategory, confidence, matchedSignals: best.signals };
+  const runnerUp = ranked[1];
+  const secondary = confidence === 'high' && runnerUp && runnerUp[1].score >= SECONDARY_MIN_SCORE
+    ? runnerUp[0]
+    : undefined;
+  return { category: bestCategory, confidence, matchedSignals: best.signals, ...(secondary ? { secondary } : {}) };
 }
 
 function signal(pattern: RegExp, label: string, weight: number): Signal {

@@ -3,10 +3,14 @@ import { test } from 'node:test';
 
 import {
   countTermHits,
+  extractPathReferences,
   extractRelativeImports,
   extractSearchTerms,
+  findRelatedTests,
   isSafeTextPath,
-  rankContextPaths
+  isTestPath,
+  rankContextPaths,
+  resolveMentionedPaths
 } from './discovery';
 
 test('extracts bounded meaningful task terms', () => {
@@ -115,4 +119,34 @@ test('git and open-tab signals corroborate but never qualify a path alone', () =
   assert.ok(ranked.includes('src/a.ts'), 'changed + open (30) clears the threshold');
   assert.ok(!ranked.includes('src/b.ts'), 'open alone (10) does not');
   assert.equal(ranked[0], 'src/invoice.ts');
+});
+
+test('extracts file paths from pasted stack traces and resolves them in the workspace', () => {
+  const trace = 'TypeError: x is undefined\n    at save (src/forms/save.ts:42:7)\n    at C:\\repo\\src\\api\\client.ts:10:3';
+  const references = extractPathReferences(trace);
+
+  assert.ok(references.includes('src/forms/save.ts'));
+  assert.ok(references.includes('repo/src/api/client.ts'));
+  assert.deepEqual(
+    [...resolveMentionedPaths(references, ['src/forms/save.ts', 'src/api/client.ts', 'src/other.ts'])].sort(),
+    ['src/api/client.ts', 'src/forms/save.ts']
+  );
+});
+
+test('finds conventionally named test files next to source files', () => {
+  const all = ['src/save.ts', 'src/save.test.ts', 'src/other.ts', 'tests/test_parse.py', 'pkg/parse.go', 'pkg/parse_test.go'];
+
+  assert.deepEqual(findRelatedTests(['src/save.ts'], all), ['src/save.test.ts']);
+  assert.deepEqual(findRelatedTests(['pkg/parse.go'], all), ['pkg/parse_test.go']);
+  assert.deepEqual(findRelatedTests(['src/save.test.ts'], all), []);
+  assert.equal(isTestPath('src/__tests__/a.ts'), true);
+  assert.equal(isTestPath('src/save.ts'), false);
+});
+
+test('paths named in the prompt outrank weak term matches', () => {
+  const ranked = rankContextPaths(['src/a.ts', 'src/b.ts'], 'unrelated words', undefined, [], {
+    mentionedPaths: new Set(['src/b.ts'])
+  });
+
+  assert.deepEqual(ranked, ['src/b.ts']);
 });

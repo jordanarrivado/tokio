@@ -43,3 +43,15 @@ test('classification is deterministic', () => {
   const prompt = 'Diagnose why the service fails after retrying.';
   assert.deepEqual(classifyWorkCategory(prompt), classifyWorkCategory(prompt));
 });
+
+test("does not treat a negated request as that category", () => {
+  assert.notEqual(classifyWorkCategory("Fix the crash. Don't refactor anything else.").category, 'refactor');
+  assert.equal(classifyWorkCategory("Fix the crash. Don't refactor anything else.").category, 'bug');
+});
+
+test('reports a clear secondary category when two kinds of work are present', () => {
+  const result = classifyWorkCategory('The checkout is broken, not working, and crashes after payment. Add tests to cover the fix.');
+
+  assert.equal(result.category, 'bug');
+  assert.equal(result.secondary, 'tests');
+});
