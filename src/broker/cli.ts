@@ -1,0 +1,219 @@
+#!/usr/bin/env node
+import { readFile, writeFile } from 'node:fs/promises';
+import { refinePrompt } from '../core/refine';
+import type { AgentCommand } from './bench';
+import { formatBenchSummary, parseBenchTasks, runBench } from './bench';
+import { buildRepoMap } from '../context/repomap';
+import { appendAuditEntry } from './audit';
+import { evaluateToolUse } from './hook';
+import { scanRepository } from './scan';
+import { serveStdio } from './mcp';
+import { formatStats, readAuditEntries, summarizeAudit } from './stats';
+import { Broker } from './tools';
+
+const AGENTS: Record<string, AgentCommand> = {
+  claude: { command: 'claude', args: ['-p', '--output-format', 'json'] }
+};
+
+const DEFAULT_BUDGET_TOKENS = 1500;
+
+const USAGE = [
+  'Usage:',
+  '  tokio mcp [--root <dir>]                       serve broker tools over stdio (MCP)',
+  '  tokio hook                                     PreToolUse hook: reads event JSON on stdin',
+  '  tokio map <task> [--root <dir>] [--target <path>] [--budget <tokens>]',
+  '  tokio stats [--root <dir>] [--since <YYYY-MM-DD>]   estimated usage from the audit log',
+  '  tokio bench <tasks.json> [--agent claude] [--repeat <n>] [--out <report.json>]'
+].join('\n');
+
+async function main(argv: string[]): Promise<void> {
+  const [command, ...rest] = argv;
+
+  if (command === 'bench') {
+    await runBenchCommand(rest);
+    return;
+  }
+  if (command === 'map') {
+    await runMapCommand(rest);
+    return;
+  }
+  if (command === 'mcp') {
+    serveStdio(new Broker(parseRootArg(rest)));
+    return;
+  }
+  if (command === 'hook') {
+    await runHookCommand();
+    return;
+  }
+  if (command === 'stats') {
+    await runStatsCommand(rest);
+    return;
+  }
+
+  process.stderr.write(`${USAGE}\n`);
+  process.exitCode = command ? 1 : 0;
+}
+
+async function runBenchCommand(args: string[]): Promise<void> {
+  const options = parseBenchArgs(args);
+  const tasks = parseBenchTasks(await readFile(options.file, 'utf8'));
+  const agent = AGENTS[options.agentName];
+  if (!agent) {
+    throw new Error(`Unknown agent "${options.agentName}". Supported: ${Object.keys(AGENTS).join(', ')}.`);
+  }
+
+  const report = await runBench({
+    tasks,
+    agent,
+    repeats: options.repeats,
+    // Tokio arm: refined prompt plus the repo map, so the comparison covers scope and context.
+    // This is a proxy for the MCP flow, where the agent pulls the same context on demand.
+    buildTokioPrompt: async (task) => {
+      const refined = refinePrompt({ rawPrompt: task, target: 'claude' }).refinedPrompt;
+      const scan = await scanRepository(process.cwd());
+      const map = buildRepoMap(scan.files, { task, budgetTokens: DEFAULT_BUDGET_TOKENS });
+      return `${refined}\n\n${map.text}`;
+    }
+  });
+
+  if (options.outPath) {
+    await writeFile(options.outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+  }
+  process.stdout.write(`${formatBenchSummary(report.summary)}\n`);
+}
+
+async function runMapCommand(args: string[]): Promise<void> {
+  let task: string | undefined;
+  let root = process.cwd();
+  let targetPath: string | undefined;
+  let budgetTokens = DEFAULT_BUDGET_TOKENS;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === '--root') {
+      root = requireValue(args, ++index, value);
+    } else if (value === '--target') {
+      targetPath = requireValue(args, ++index, value);
+    } else if (value === '--budget') {
+      budgetTokens = Number(requireValue(args, ++index, value));
+      if (!Number.isInteger(budgetTokens) || budgetTokens < 1) {
+        throw new Error('--budget must be a positive integer.');
+      }
+    } else if (value.startsWith('--')) {
+      throw new Error(`Unknown option ${value}.`);
+    } else {
+      task = value;
+    }
+  }
+
+  if (!task) {
+    throw new Error(`Missing task text.\n${USAGE}`);
+  }
+
+  const scan = await scanRepository(root);
+  const map = buildRepoMap(scan.files, { task, targetPath, budgetTokens });
+  const notes = [
+    scan.truncated ? `Scan stopped at ${scan.files.length} files.` : undefined,
+    map.omittedFiles > 0 ? `${map.omittedFiles} ranked files omitted by the budget.` : undefined
+  ].filter((note): note is string => note !== undefined);
+
+  process.stdout.write(`${map.text}\n`);
+  process.stdout.write(`\n[${map.tokens} tokens, ${map.files.length} files${notes.length ? `; ${notes.join(' ')}` : ''}]\n`);
+}
+
+async function runStatsCommand(args: string[]): Promise<void> {
+  const root = parseRootArg(args);
+  const sinceIndex = args.indexOf('--since');
+  const since = sinceIndex >= 0 ? new Date(requireValue(args, sinceIndex + 1, '--since')) : undefined;
+  if (since !== undefined && Number.isNaN(since.getTime())) {
+    throw new Error('--since must be a date such as 2026-10-15.');
+  }
+
+  const entries = (await readAuditEntries(root))
+    .filter((entry) => since === undefined || new Date(entry.timestamp) >= since);
+  const scope = since ? `since ${since.toISOString().slice(0, 10)}` : 'all recorded calls';
+  process.stdout.write(`${formatStats(summarizeAudit(entries), scope)}\n`);
+}
+
+/** Claude Code sends the tool event on stdin. Exit code 2 blocks the call and shows stderr to the agent. */
+async function runHookCommand(): Promise<void> {
+  const verdict = evaluateToolUse(await readStdin());
+  if (!verdict.blocked) {
+    return;
+  }
+
+  try {
+    await appendAuditEntry(verdict.cwd ?? process.cwd(), {
+      tool: verdict.tool,
+      inputTokens: 0,
+      outputTokens: 0,
+      files: verdict.path ? [verdict.path] : [],
+      redactions: [],
+      blocked: true
+    });
+  } catch {
+    // Blocking does not depend on the audit log being writable.
+  }
+  process.stderr.write(`Tokio blocked ${verdict.tool}: ${verdict.reason}\n`);
+  process.exitCode = 2;
+}
+
+function readStdin(): Promise<string> {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (chunk: string) => {
+      data += chunk;
+    });
+    process.stdin.on('end', () => resolve(data));
+    process.stdin.on('error', reject);
+  });
+}
+
+function parseRootArg(args: string[]): string {
+  const index = args.indexOf('--root');
+  return index >= 0 ? requireValue(args, index + 1, '--root') : process.cwd();
+}
+
+function parseBenchArgs(args: string[]): { file: string; agentName: string; repeats: number; outPath?: string } {
+  let file: string | undefined;
+  let agentName = 'claude';
+  let repeats = 1;
+  let outPath: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === '--agent') {
+      agentName = requireValue(args, ++index, value);
+    } else if (value === '--repeat') {
+      repeats = Number(requireValue(args, ++index, value));
+      if (!Number.isInteger(repeats) || repeats < 1) {
+        throw new Error('--repeat must be a positive integer.');
+      }
+    } else if (value === '--out') {
+      outPath = requireValue(args, ++index, value);
+    } else if (value.startsWith('--')) {
+      throw new Error(`Unknown option ${value}.`);
+    } else {
+      file = value;
+    }
+  }
+
+  if (!file) {
+    throw new Error(`Missing tasks file.\n${USAGE}`);
+  }
+  return { file, agentName, repeats, outPath };
+}
+
+function requireValue(args: string[], index: number, flag: string): string {
+  const value = args[index];
+  if (value === undefined || value.startsWith('--')) {
+    throw new Error(`${flag} requires a value.`);
+  }
+  return value;
+}
+
+main(process.argv.slice(2)).catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});

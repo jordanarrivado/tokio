@@ -47,6 +47,9 @@ export function detectValidationCommands(input: {
     }
   }
 
+  if (rootPaths.has('artisan') && rootPaths.has('composer.json')) {
+    return ['php artisan test'];
+  }
   if (rootPaths.has('Cargo.toml')) {
     return ['cargo test'];
   }

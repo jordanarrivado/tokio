@@ -22,9 +22,14 @@ export function extractSearchTerms(rawPrompt: string): string[] {
     .slice(0, 20);
 }
 
+/** True for env files, credential files, and private keys that must never reach a prompt or agent. */
+export function isSecretPath(path: string): boolean {
+  return SECRET_PATH_PATTERN.test(path.replaceAll('\\', '/'));
+}
+
 export function isSafeTextPath(path: string): boolean {
   const normalized = path.replaceAll('\\', '/');
-  if (SECRET_PATH_PATTERN.test(normalized)) {
+  if (isSecretPath(normalized)) {
     return false;
   }
 

@@ -5,6 +5,11 @@ import { detectConventionFiles, detectValidationCommands } from './project';
 
 const paths = (...values: string[]) => new Set(values);
 
+test('detects the Laravel test command only when artisan and composer.json both exist', () => {
+  assert.deepEqual(detectValidationCommands({ rootPaths: paths('artisan', 'composer.json') }), ['php artisan test']);
+  assert.deepEqual(detectValidationCommands({ rootPaths: paths('composer.json') }), []);
+});
+
 test('detects agent convention files at the repository root', () => {
   assert.deepEqual(
     detectConventionFiles(paths('README.md', 'AGENTS.md', 'CLAUDE.md')),

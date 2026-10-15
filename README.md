@@ -47,7 +47,8 @@ Available scripts:
 | Path | Purpose |
 | --- | --- |
 | `src/core/` | Pure refinement and category-detection logic with no VS Code dependency. |
-| `src/context/` | Bounded, read-only repository discovery. |
+| `src/context/` | Bounded, read-only repository discovery and the ranked repository map. |
+| `src/broker/` | Node CLI and MCP server for coding agents: tools, policy, hook, audit, and benchmark. |
 | `src/ui/` | Webview panel and message contracts. |
 | `src/extension.ts` | Extension entry point; registers the view and the `Tokio: Focus View` command. |
 | `media/` | Extension icons. |
@@ -152,6 +153,69 @@ Create `.tokio/architecture.md` in the repository you want Tokio to understand. 
 
 Treat this as curated project documentation. Tokio does not verify whether the statements are correct. The legacy `.token-saver/architecture.md` path remains readable but produces a rename notice.
 
+## Agent broker (Claude Code)
+
+The broker is a local CLI with no runtime dependencies. It is separate from the VS Code panel and does not call any AI service. Build it first with `npm.cmd run build`, then run it from `out/broker/cli.js`.
+
+| Command | Purpose |
+| --- | --- |
+| `tokio mcp [--root <dir>]` | Serves the tools below over MCP (stdio). |
+| `tokio hook` | `PreToolUse` hook. Reads the event on stdin, exits `2` to block secret access. |
+| `tokio map "<task>" [--root <dir>] [--target <path>] [--budget <tokens>]` | Prints the ranked repository map for a task. |
+| `tokio bench <tasks.json> [--repeat <n>] [--out <report.json>]` | Compares raw and Tokio prompts through `claude -p`. |
+
+MCP tools:
+
+- `refine_task` redacts credential-shaped values, then applies Tokio's deterministic refinement.
+- `repo_map` returns files ranked by task terms and import relationships, with top-level signatures and line numbers, within a token budget.
+- `read_symbol` returns a body by line. Repeat reads of the same range return only changed lines, unless `full: true` is passed. Bodies over 200 lines are truncated and stored.
+- `search_output` searches the stored remainder of a truncated read.
+
+Register the server in the project's `.mcp.json`, replacing the path with your checkout:
+
+```json
+{
+  "mcpServers": {
+    "tokio": {
+      "command": "node",
+      "args": ["D:/token-saver/out/broker/cli.js", "mcp", "--root", "D:/your-project"]
+    }
+  }
+}
+```
+
+Block secret access with a hook in the project's `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write|MultiEdit|Grep|Glob|Bash",
+        "hooks": [{ "type": "command", "command": "node D:/token-saver/out/broker/cli.js hook" }]
+      }
+    ]
+  }
+}
+```
+
+Secret paths (`.env`, credential files, keys) are blocked in file fields and in Bash command tokens. Unparseable hook input is blocked. The hook does not parse arbitrary shell, so broad searches such as `grep -r` can still read secret files. Add Claude Code permission deny rules for secret files as a second layer.
+
+Every broker call and every hook block appends one line to `.tokio/audit.log`. The log records tool name, estimated tokens, file paths, and redaction kinds. It never records file contents or prompt text. The `*.log` pattern in `.gitignore` keeps it out of version control.
+
+### Benchmark
+
+`tokio bench` runs each task twice, once with the raw text and once with the Tokio prompt (refined prompt plus repository map), using `claude -p --output-format json`. Prompts are sent on stdin. The summary compares billable tokens (input, cache creation, and output). Cache reads are excluded because they are billed at a lower rate. The Tokio arm is a proxy for the MCP flow, where the agent pulls the same context on demand.
+
+```json
+[
+  { "id": "login-redirect", "task": "Fix the redirect loop after login in the auth middleware." },
+  { "id": "csv-export", "task": "Add a CSV export option to the reports page." }
+]
+```
+
+Results depend on the model, the repository, and the task set. Run enough tasks and repeats to see the variance before drawing conclusions.
+
 ## Create and install a local VSIX
 
 The VSIX packaging tool is not a project dependency. Use `npx` to fetch the official packaging CLI on demand and build a local package:
@@ -196,7 +260,9 @@ The `vscode:prepublish` hook runs a clean build, and `.vscodeignore` keeps sourc
 - Refinement is rule-based rather than semantic or AI-assisted.
 - Repository matching is filename/import heuristic-based and may miss relevant files, especially after the 500-path cap.
 - Architecture knowledge is only as accurate as the user-maintained profile.
-- Prompts must be copied and pasted manually; there is no interception or automatic submission.
+- Prompts must be copied and pasted manually in the VS Code panel; there is no interception or automatic submission. The agent broker supplies context through MCP for Claude Code only.
+- The repository map uses regex symbol extraction and JS/TS relative imports. Python, Go, and Rust files get symbols but no import edges.
+- Other MCP servers are not trimmed by Tokio. Use a tool such as mcpfold or mcp-compressor for their schemas.
 - There are no accounts, telemetry, analytics, persistence across VS Code sessions, or remote calls.
 - Prompt length is not the same as end-to-end coding-agent token usage; no token-saving claim has been benchmarked.
 - Automated tests cover the core and message contracts, but not rendered VS Code UI behavior or the operating-system clipboard integration.
