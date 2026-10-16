@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { isSafeTextPath, isSecretPath } from '../context/discovery';
+import { readCoChangeLinks } from '../context/history';
 import type { RepoFile } from '../context/repomap';
 
 /** Mirrors the extension's workspace rules, plus common Rust, Python, and virtualenv output. */
@@ -14,6 +15,8 @@ export const MAX_FILE_BYTES = 32_000;
 export interface ScanResult {
   files: RepoFile[];
   truncated: boolean;
+  /** Co-change links from recent git history, empty when git is unavailable. */
+  coChange: Map<string, string[]>;
 }
 
 /**
@@ -55,5 +58,6 @@ export async function scanRepository(root: string): Promise<ScanResult> {
   }
 
   await walk(root);
-  return { files, truncated };
+  const coChange = await readCoChangeLinks(root, new Set(files.map((file) => file.path)));
+  return { files, truncated, coChange };
 }

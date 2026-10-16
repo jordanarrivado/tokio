@@ -24,6 +24,15 @@ test('blocks secret file fields and Bash commands, allows normal files', () => {
   assert.equal(allowed.tool, 'Read');
 });
 
+test('allows bare search words in Bash but still blocks secret files named in a command', () => {
+  assert.equal(evaluateToolUse(event('Bash', { command: 'grep -rn "secret" src' })).blocked, false);
+  assert.equal(evaluateToolUse(event('Bash', { command: 'echo credentials are managed elsewhere' })).blocked, false);
+
+  assert.equal(evaluateToolUse(event('Bash', { command: 'cat config/secrets.yaml' })).blocked, true);
+  assert.equal(evaluateToolUse(event('Bash', { command: 'cat .env | head' })).blocked, true);
+  assert.equal(evaluateToolUse(event('Bash', { command: 'type credentials.json' })).blocked, true);
+});
+
 test('accepts event JSON prefixed with a byte-order mark', () => {
   const verdict = evaluateToolUse(`﻿${event('Read', { file_path: '.env' })}`);
   assert.equal(verdict.blocked, true);

@@ -70,9 +70,15 @@ export function redactSecrets(text: string): RedactionResult {
   return { text: output, redactions };
 }
 
-/** Returns the first shell token that names a secret path, such as `cat .env`. */
+/**
+ * Returns the first shell token that names a secret file, such as `cat .env` or `cat config/secrets.yaml`.
+ * A bare word such as `secret` or `credentials` is a search term far more often than a path, so it needs
+ * a dot or a slash to count. File fields in tool input are still checked for every path.
+ */
 export function findSecretReference(command: string): string | undefined {
-  return command.split(COMMAND_TOKEN_SEPARATORS).find((token) => token.length > 0 && isSecretPath(token));
+  return command
+    .split(COMMAND_TOKEN_SEPARATORS)
+    .find((token) => token.length > 0 && /[./\\]/.test(token) && isSecretPath(token));
 }
 
 /**

@@ -71,3 +71,35 @@ test('collapses long symbol lists and still produces a map with no task terms', 
   assert.ok(map.text.includes('... 37 more'));
   assert.ok(map.files.length > 0);
 });
+
+test('ranks Python modules imported by a task-relevant file above unrelated files', () => {
+  const python: RepoFile[] = [
+    { path: 'app/billing/invoice.py', content: 'from app.ledger import tax\n\ndef invoice_total(items):\n    return tax.apply(items)\n' },
+    { path: 'app/ledger/tax.py', content: 'def apply(items):\n    return items\n' },
+    { path: 'app/misc/notes.py', content: 'def remember(text):\n    return text\n' }
+  ];
+  const map = buildRepoMap(python, { task: 'fix the invoice total', budgetTokens: 4000 });
+  assert.ok(map.files.indexOf('app/ledger/tax.py') < map.files.indexOf('app/misc/notes.py'));
+});
+
+test('ranks files that co-change with a relevant file above unrelated files', () => {
+  const coupled: RepoFile[] = [
+    { path: 'src/billing/invoice.ts', content: 'export function invoiceTotal() {}\n' },
+    { path: 'src/ledger/entries.ts', content: 'export function postEntry() {}\n' },
+    { path: 'src/misc/notes.ts', content: 'export function remember() {}\n' }
+  ];
+  const coChange = new Map([
+    ['src/billing/invoice.ts', ['src/ledger/entries.ts']],
+    ['src/ledger/entries.ts', ['src/billing/invoice.ts']]
+  ]);
+  const map = buildRepoMap(coupled, { task: 'fix the invoice total', budgetTokens: 4000, coChange });
+  assert.ok(map.files.indexOf('src/ledger/entries.ts') < map.files.indexOf('src/misc/notes.ts'));
+
+  // Partners that are not scanned files are ignored rather than added to the map.
+  const withGhost = buildRepoMap(coupled, {
+    task: 'fix the invoice total',
+    budgetTokens: 4000,
+    coChange: new Map([['src/billing/invoice.ts', ['deleted/old.ts']]])
+  });
+  assert.equal(withGhost.files.includes('deleted/old.ts'), false);
+});

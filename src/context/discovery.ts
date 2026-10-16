@@ -27,6 +27,18 @@ export function isSecretPath(path: string): boolean {
   return SECRET_PATH_PATTERN.test(path.replaceAll('\\', '/'));
 }
 
+/**
+ * Claude Code `Read` deny patterns for the same files `isSecretPath` covers. Bare names follow gitignore
+ * rules and match at any depth. Names are exact, so `secretary.ts` is not blocked. Claude Code applies a
+ * `Read` deny to Read, Grep, Glob, and Edit/Write on the same path, which is a second layer beside the hook.
+ */
+export const SECRET_DENY_PATTERNS: readonly string[] = [
+  '.env', '.env.*', '.env/**', '.npmrc',
+  'credential', 'credential.*', 'credential/**', 'credentials', 'credentials.*', 'credentials/**',
+  'secret', 'secret.*', 'secret/**', 'secrets', 'secrets.*', 'secrets/**',
+  '*.key', '*.pem', '*.p12', '*.pfx'
+];
+
 export function isSafeTextPath(path: string): boolean {
   const normalized = path.replaceAll('\\', '/');
   if (isSecretPath(normalized)) {

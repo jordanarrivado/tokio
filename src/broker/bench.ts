@@ -1,10 +1,18 @@
-import { spawn } from 'node:child_process';
-import { refinePrompt } from '../core/refine';
+import { execFile, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { mkdtemp, rm, rmdir, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { estimateTokens } from '../core/tokens';
+
+const execFileAsync = promisify(execFile);
 
 export interface BenchTask {
   id: string;
   task: string;
+  /** Shell command run in the run's workspace after the agent exits. Exit code 0 means the task passed. */
+  verify?: string;
 }
 
 export interface AgentCommand {
@@ -31,6 +39,8 @@ export interface BenchRun {
   arm: BenchArm;
   promptTokens: number;
   usage: AgentUsage;
+  /** Result of the task's verify command. Null when the task has no verify command. */
+  verified: boolean | null;
 }
 
 export interface ArmSummary {
@@ -40,6 +50,10 @@ export interface ArmSummary {
   /** Input, cache-creation, and output tokens. Cache reads are excluded because they are billed at a lower rate. */
   billableTokens: number;
   costUsd: number;
+  turns: number;
+  durationMs: number;
+  verifyPassed: number;
+  verifyFailed: number;
 }
 
 export interface BenchSummary {
@@ -59,15 +73,28 @@ export interface BenchReport {
 export interface BenchOptions {
   tasks: readonly BenchTask[];
   agent: AgentCommand;
-  /** Builds the prompt for the Tokio arm. The raw arm always sends the task text unchanged. */
-  buildTokioPrompt: (task: string) => Promise<string>;
+  /**
+   * Builds the prompt for the Tokio arm from the task text and the directory the agent will run in.
+   * The raw arm always sends the task text unchanged.
+   */
+  buildTokioPrompt: (task: string, workspace: string) => Promise<string>;
+  /** Git repository used for tasks with a verify command. Defaults to the current directory. */
+  root?: string;
   repeats?: number;
   timeoutMs?: number;
 }
 
+interface Workspace {
+  path: string;
+  dispose: () => Promise<void>;
+}
+
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
 
-/** Parses a tasks file: a JSON array of `{ "task": string, "id"?: string }`. */
+/**
+ * Parses a tasks file: a JSON array of `{ "task": string, "id"?: string, "verify"?: string }`.
+ * A verify command runs in a fresh checkout of the repository's HEAD, so it checks committed state.
+ */
 export function parseBenchTasks(json: string): BenchTask[] {
   const parsed: unknown = JSON.parse(json);
   if (!Array.isArray(parsed)) {
@@ -78,8 +105,13 @@ export function parseBenchTasks(json: string): BenchTask[] {
     if (!isRecord(item) || typeof item.task !== 'string' || item.task.trim().length === 0) {
       throw new Error(`Task ${index + 1} must be an object with a non-empty "task" string.`);
     }
+    if (item.verify !== undefined && (typeof item.verify !== 'string' || item.verify.trim().length === 0)) {
+      throw new Error(`Task ${index + 1} "verify" must be a non-empty command string.`);
+    }
     const id = typeof item.id === 'string' && item.id.length > 0 ? item.id : `task-${index + 1}`;
-    return { id, task: item.task };
+    return typeof item.verify === 'string'
+      ? { id, task: item.task, verify: item.verify }
+      : { id, task: item.task };
   });
 }
 
@@ -128,24 +160,13 @@ export function summarizeRuns(runs: readonly BenchRun[]): BenchSummary {
 export async function runBench(options: BenchOptions): Promise<BenchReport> {
   const repeats = Math.max(1, options.repeats ?? 1);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const root = options.root ?? process.cwd();
   const runs: BenchRun[] = [];
 
   for (const task of options.tasks) {
     for (let repeat = 0; repeat < repeats; repeat += 1) {
-      const tokioPrompt = await options.buildTokioPrompt(task.task);
-      const arms: [BenchArm, string][] = [['raw', task.task], ['tokio', tokioPrompt]];
-
-      for (const [arm, prompt] of arms) {
-        const run = await runAgent(options.agent, prompt, timeoutMs);
-        const usage = parseAgentUsage(run.stdout);
-        // A run with no usage report is a configuration or startup failure, not a data point.
-        if (usage.inputTokens === null && usage.outputTokens === null && usage.costUsd === null) {
-          throw new Error(
-            `Agent "${options.agent.command}" returned no usage report (exit ${run.exitCode}). ` +
-            run.stderr.trim().slice(0, 300)
-          );
-        }
-        runs.push({ taskId: task.id, arm, promptTokens: estimateTokens(prompt), usage });
+      for (const arm of ['raw', 'tokio'] as const) {
+        runs.push(await runArm(options, task, arm, root, timeoutMs));
       }
     }
   }
@@ -159,16 +180,115 @@ export async function runBench(options: BenchOptions): Promise<BenchReport> {
 }
 
 export function formatBenchSummary(summary: BenchSummary): string {
-  const line = (label: string, arm: ArmSummary) => (
-    `${label}: runs=${arm.runs} errors=${arm.errors} promptTokens≈${arm.promptTokens} ` +
-    `billableTokens=${arm.billableTokens} costUsd=${arm.costUsd.toFixed(4)}`
-  );
+  const line = (label: string, arm: ArmSummary) => {
+    const verified = arm.verifyPassed + arm.verifyFailed === 0
+      ? 'n/a'
+      : `${arm.verifyPassed}/${arm.verifyPassed + arm.verifyFailed}`;
+    return `${label}: runs=${arm.runs} errors=${arm.errors} turns=${arm.turns} ` +
+      `duration=${(arm.durationMs / 1000).toFixed(1)}s verified=${verified} ` +
+      `promptTokens≈${arm.promptTokens} billableTokens=${arm.billableTokens} costUsd=${arm.costUsd.toFixed(4)}`;
+  };
   const ratio = summary.billableRatio === null ? 'n/a' : summary.billableRatio.toFixed(3);
   return [line('raw  ', summary.raw), line('tokio', summary.tokio), `billable ratio (tokio/raw): ${ratio}`].join('\n');
 }
 
+/** Runs one arm of one task. Tasks with a verify command get their own workspace, removed afterwards. */
+async function runArm(
+  options: BenchOptions,
+  task: BenchTask,
+  arm: BenchArm,
+  root: string,
+  timeoutMs: number
+): Promise<BenchRun> {
+  // Each verified run starts from the same committed state, so one run's edits cannot reach the next run
+  // or the user's working tree.
+  const workspace = task.verify === undefined ? null : await createWorkspace(root);
+  try {
+    const cwd = workspace?.path;
+    const prompt = arm === 'raw' ? task.task : await options.buildTokioPrompt(task.task, cwd ?? root);
+    const run = await runAgent(options.agent, prompt, timeoutMs, cwd);
+    const usage = parseAgentUsage(run.stdout);
+    // A run with no usage report is a configuration or startup failure, not a data point.
+    if (usage.inputTokens === null && usage.outputTokens === null && usage.costUsd === null) {
+      throw new Error(
+        `Agent "${options.agent.command}" returned no usage report (exit ${run.exitCode}). ` +
+        run.stderr.trim().slice(0, 300)
+      );
+    }
+    const verified = workspace && task.verify !== undefined
+      ? await runVerify(task.verify, workspace.path, timeoutMs)
+      : null;
+    return { taskId: task.id, arm, promptTokens: estimateTokens(prompt), usage, verified };
+  } finally {
+    await workspace?.dispose();
+  }
+}
+
+/** Creates a detached git worktree at HEAD. Shares the repository's node_modules through a junction when present. */
+async function createWorkspace(root: string): Promise<Workspace> {
+  const holder = await mkdtemp(join(tmpdir(), 'tokio-bench-'));
+  const path = join(holder, 'run');
+  try {
+    await execFileAsync('git', ['-C', root, 'worktree', 'add', '--detach', path, 'HEAD']);
+  } catch (error) {
+    await rm(holder, { recursive: true, force: true });
+    const detail = error instanceof Error && 'stderr' in error ? String(error.stderr).trim() : '';
+    throw new Error(
+      `Tasks with "verify" need a git repository with at least one commit at "${root}". ${detail.slice(0, 300)}`
+    );
+  }
+
+  // A junction needs no admin rights on Windows and lets verify commands such as npm test run.
+  const sharedModules = join(root, 'node_modules');
+  const linkedModules = existsSync(sharedModules) ? join(path, 'node_modules') : null;
+  if (linkedModules) {
+    await symlink(sharedModules, linkedModules, 'junction');
+  }
+
+  return {
+    path,
+    dispose: async () => {
+      // Remove the junction before git touches the worktree, so cleanup never reaches the shared dependencies.
+      if (linkedModules) {
+        await rmdir(linkedModules).catch(() => undefined);
+      }
+      await execFileAsync('git', ['-C', root, 'worktree', 'remove', '--force', path]).catch(() => undefined);
+      await rm(holder, { recursive: true, force: true });
+    }
+  };
+}
+
+/** Runs a verify command in the workspace. Resolves true only for exit code 0. */
+function runVerify(command: string, cwd: string, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, { shell: true, cwd, stdio: 'ignore' });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Verify command timed out after ${timeoutMs} ms: ${command}`));
+    }, timeoutMs);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(new Error(`Could not run verify command "${command}": ${error.message}`));
+    });
+    child.on('close', (exitCode) => {
+      clearTimeout(timer);
+      resolve(exitCode === 0);
+    });
+  });
+}
+
 function summarizeArm(runs: readonly BenchRun[], arm: BenchArm): ArmSummary {
-  const summary: ArmSummary = { runs: 0, errors: 0, promptTokens: 0, billableTokens: 0, costUsd: 0 };
+  const summary: ArmSummary = {
+    runs: 0,
+    errors: 0,
+    promptTokens: 0,
+    billableTokens: 0,
+    costUsd: 0,
+    turns: 0,
+    durationMs: 0,
+    verifyPassed: 0,
+    verifyFailed: 0
+  };
   for (const run of runs.filter((item) => item.arm === arm)) {
     summary.runs += 1;
     summary.promptTokens += run.promptTokens;
@@ -176,8 +296,15 @@ function summarizeArm(runs: readonly BenchRun[], arm: BenchArm): ArmSummary {
       + (run.usage.cacheCreationTokens ?? 0)
       + (run.usage.outputTokens ?? 0);
     summary.costUsd += run.usage.costUsd ?? 0;
+    summary.turns += run.usage.turns ?? 0;
+    summary.durationMs += run.usage.durationMs ?? 0;
     if (run.usage.isError) {
       summary.errors += 1;
+    }
+    if (run.verified === true) {
+      summary.verifyPassed += 1;
+    } else if (run.verified === false) {
+      summary.verifyFailed += 1;
     }
   }
   return summary;
@@ -189,13 +316,13 @@ interface AgentRun {
   exitCode: number | null;
 }
 
-function runAgent(agent: AgentCommand, prompt: string, timeoutMs: number): Promise<AgentRun> {
+function runAgent(agent: AgentCommand, prompt: string, timeoutMs: number, cwd?: string): Promise<AgentRun> {
   return new Promise((resolve, reject) => {
     // On Windows, npm-installed CLIs are .cmd shims, which spawn only through a shell. The shell
     // gets one quoted command line built from fixed flags, so it never sees task text.
     const child = process.platform === 'win32'
-      ? spawn([agent.command, ...agent.args].map(quoteArg).join(' '), { shell: true, stdio: ['pipe', 'pipe', 'pipe'] })
-      : spawn(agent.command, [...agent.args], { stdio: ['pipe', 'pipe', 'pipe'] });
+      ? spawn([agent.command, ...agent.args].map(quoteArg).join(' '), { shell: true, stdio: ['pipe', 'pipe', 'pipe'], cwd })
+      : spawn(agent.command, [...agent.args], { stdio: ['pipe', 'pipe', 'pipe'], cwd });
 
     let stdout = '';
     let stderr = '';

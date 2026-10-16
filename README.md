@@ -153,9 +153,28 @@ Create `.tokio/architecture.md` in the repository you want Tokio to understand. 
 
 Treat this as curated project documentation. Tokio does not verify whether the statements are correct. The legacy `.token-saver/architecture.md` path remains readable but produces a rename notice.
 
-## Agent broker (Claude Code)
+## Agent broker (Claude Code and Codex)
 
 The broker is a local CLI with no runtime dependencies. It is separate from the VS Code panel and does not call any AI service. Build it first with `npm.cmd run build`, then run it from `out/broker/cli.js`.
+
+### Set up a project
+
+From the project root, run:
+
+```powershell
+node D:/token-saver/out/broker/cli.js init
+```
+
+`tokio init` configures both agents in one step, using the path of the CLI it runs from:
+
+- `.mcp.json` gets the `tokio` MCP server (Claude Code).
+- `.claude/settings.json` gets the PreToolUse and UserPromptSubmit hooks (Claude Code).
+- `.codex/config.toml` gets the `[mcp_servers.tokio]` table (Codex).
+- `AGENTS.md` gets a block between `<!-- tokio:begin -->` and `<!-- tokio:end -->` with the tool workflow. Re-running refreshes only that block.
+
+Existing content is preserved. Other servers, hooks, settings, and tables are not touched. A Tokio entry that points somewhere else is reported as a conflict and kept. Use `--force` to replace it. Use `--dry-run` to preview. `init` exits 1 when a file conflicts or cannot be read. Guidance that was written by hand without the markers is left in place, to avoid duplicating it.
+
+The manual steps below show what `init` writes. Use them only if you prefer to edit the files yourself.
 
 | Command | Purpose |
 | --- | --- |
@@ -167,7 +186,7 @@ The broker is a local CLI with no runtime dependencies. It is separate from the 
 MCP tools:
 
 - `refine_task` redacts credential-shaped values, then applies Tokio's deterministic refinement.
-- `repo_map` returns files ranked by task terms and import relationships, with top-level signatures and line numbers, within a token budget.
+- `repo_map` returns files ranked by task terms, import relationships (JS/TS, Python, Go, Rust), and co-change history from git when available, with top-level signatures and line numbers, within a token budget.
 - `read_symbol` returns a body by line. Repeat reads of the same range return only changed lines, unless `full: true` is passed. Bodies over 200 lines are truncated and stored.
 - `search_output` searches the stored remainder of a truncated read.
 
@@ -199,20 +218,51 @@ Block secret access with a hook in the project's `.claude/settings.json`:
 }
 ```
 
-Secret paths (`.env`, credential files, keys) are blocked in file fields and in Bash command tokens. Unparseable hook input is blocked. The hook does not parse arbitrary shell, so broad searches such as `grep -r` can still read secret files. Add Claude Code permission deny rules for secret files as a second layer.
+### Automatic repository context (optional)
+
+`tokio prompt-hook` is a `UserPromptSubmit` hook. When a prompt names things that exist in the repository, it adds a ranked repository map to that prompt, so the agent does not have to call `repo_map` itself. It adds nothing for short prompts, slash commands, or prompts that match no files. The map is capped at about 1,500 tokens and is redacted for credential-shaped values. Every injection is recorded in `.tokio/audit.log` without the prompt text.
+
+Register it in the project's `.claude/settings.json`, next to the PreToolUse hook:
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [{ "type": "command", "command": "node D:/token-saver/out/broker/cli.js prompt-hook" }]
+      }
+    ]
+  }
+}
+```
+
+The hook fails open. Any error, such as a missing repository or malformed input, adds nothing and never blocks the prompt. Claude Code allows 30 seconds for this hook and caps the injected context at 10,000 characters. Injection costs tokens on every matching prompt, even when the agent would not have needed the map. Whether it saves tokens overall depends on the task, so measure it with `tokio bench` before relying on it.
+
+Secret paths (`.env`, credential files, keys) are blocked in file fields and in Bash command tokens. Unparseable hook input is blocked. The hook does not parse arbitrary shell, so broad searches such as `grep -r` can still read secret files. As a second layer, `tokio init` adds `Read(...)` deny rules for the same file patterns to `permissions.deny` in `.claude/settings.json`. Claude Code applies a `Read` deny to Read, Grep, Glob, and Edit/Write on the same path, and it enforces the rule even when a hook allows the call. Deny rules match Bash command text, not what a program reads, so they do not stop `grep -r` or `cat` run through Bash. The hook is the only Bash-side check. Use a sandbox if Bash reads must be fully blocked.
 
 Every broker call and every hook block appends one line to `.tokio/audit.log`. The log records tool name, estimated tokens, file paths, and redaction kinds. It never records file contents or prompt text. The `*.log` pattern in `.gitignore` keeps it out of version control.
 
 ### Benchmark
 
-`tokio bench` runs each task twice, once with the raw text and once with the Tokio prompt (refined prompt plus repository map), using `claude -p --output-format json`. Prompts are sent on stdin. The summary compares billable tokens (input, cache creation, and output). Cache reads are excluded because they are billed at a lower rate. The Tokio arm is a proxy for the MCP flow, where the agent pulls the same context on demand.
+`tokio bench` runs each task twice, once with the raw text and once with the Tokio prompt (refined prompt plus repository map), using `claude -p --output-format json`. Prompts are sent on stdin. The Tokio arm is a proxy for the MCP flow, where the agent pulls the same context on demand.
+
+Each arm reports the figures the agent itself returns for the whole run, summed across turns:
+
+- `billableTokens`: input, cache-creation, and output tokens. Cache reads are excluded because they are billed at a lower rate.
+- `turns` and `duration`: the agent's own turn count and wall-clock time.
+- `costUsd`: the agent's reported cost.
+- `verified`: pass count out of tasks that have a `verify` command.
+
+A task may set `verify`, a shell command that runs after the agent exits. Exit code `0` counts as a pass. Verified tasks run each arm in a fresh `git worktree` at the repository's `HEAD`, so the agent's edits never reach the next run or your working tree. Uncommitted changes are not included. A `node_modules` folder in the repository is shared into each worktree through a junction, so commands such as `npm test` can run. The agent must be allowed to edit files in headless mode. A project `.claude/settings.json` committed to the repository is the usual way to grant that.
 
 ```json
 [
-  { "id": "login-redirect", "task": "Fix the redirect loop after login in the auth middleware." },
+  { "id": "login-redirect", "task": "Fix the redirect loop after login in the auth middleware.", "verify": "npm test" },
   { "id": "csv-export", "task": "Add a CSV export option to the reports page." }
 ]
 ```
+
+Tasks without `verify` run in the current working tree, as before, and report `verified=n/a`.
 
 Results depend on the model, the repository, and the task set. Run enough tasks and repeats to see the variance before drawing conclusions.
 
@@ -261,7 +311,8 @@ The `vscode:prepublish` hook runs a clean build, and `.vscodeignore` keeps sourc
 - Repository matching is filename/import heuristic-based and may miss relevant files, especially after the 500-path cap.
 - Architecture knowledge is only as accurate as the user-maintained profile.
 - Prompts must be copied and pasted manually in the VS Code panel; there is no interception or automatic submission. The agent broker supplies context through MCP for Claude Code only.
-- The repository map uses regex symbol extraction and JS/TS relative imports. Python, Go, and Rust files get symbols but no import edges.
+- The repository map uses regex symbol extraction and regex import rules for JS/TS, Python, Go, and Rust. Rules are dependency-free and approximate: Go resolution matches package directories by import path suffix, and Python and Rust follow the common layouts only.
+- Co-change ranking uses the last 300 commits, and only when git can read the repository. Bulk commits and pairs that changed together fewer than twice are ignored.
 - Other MCP servers are not trimmed by Tokio. Use a tool such as mcpfold or mcp-compressor for their schemas.
 - There are no accounts, telemetry, analytics, persistence across VS Code sessions, or remote calls.
 - Prompt length is not the same as end-to-end coding-agent token usage; no token-saving claim has been benchmarked.

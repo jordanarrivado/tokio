@@ -1,6 +1,7 @@
 import { posix } from 'node:path';
 import { estimateTokens } from '../core/tokens';
 import { countTermHits, extractRelativeImports, extractSearchTerms } from './discovery';
+import { createImportIndex, resolveLanguageImports } from './imports';
 
 /**
  * Pure repository map: ranks files by task relevance and import relationships, then lists
@@ -22,6 +23,8 @@ export interface RepoMapOptions {
   budgetTokens: number;
   targetPath?: string;
   maxSymbolsPerFile?: number;
+  /** Files that often change together (see history.ts). Each link adds a ranking edge between two files. */
+  coChange?: ReadonlyMap<string, readonly string[]>;
 }
 
 export interface RepoMap {
@@ -61,7 +64,7 @@ export function buildRepoMap(files: readonly RepoFile[], options: RepoMapOptions
   const targetPath = options.targetPath ? normalizePath(options.targetPath) : undefined;
   const ranks = rankFiles(
     files,
-    buildImportEdges(files, known),
+    withCoChangeEdges(buildImportEdges(files, known), options.coChange, known),
     seedWeights(files, extractSearchTerms(options.task), targetPath)
   );
   const maxSymbols = options.maxSymbolsPerFile ?? DEFAULT_MAX_SYMBOLS;
@@ -132,6 +135,7 @@ export function resolveRelativeImport(
 }
 
 function buildImportEdges(files: readonly RepoFile[], known: ReadonlySet<string>): Map<string, string[]> {
+  const index = createImportIndex(files.map((file) => file.path));
   const edges = new Map<string, string[]>();
   for (const file of files) {
     const targets = new Set<string>();
@@ -141,9 +145,29 @@ function buildImportEdges(files: readonly RepoFile[], known: ReadonlySet<string>
         targets.add(resolved);
       }
     }
+    for (const resolved of resolveLanguageImports(file.path, file.content, index)) {
+      targets.add(resolved);
+    }
     edges.set(file.path, [...targets]);
   }
   return edges;
+}
+
+/** Adds co-change partners to each file's edges. Partners outside the scanned files are ignored. */
+function withCoChangeEdges(
+  edges: ReadonlyMap<string, string[]>,
+  coChange: ReadonlyMap<string, readonly string[]> | undefined,
+  known: ReadonlySet<string>
+): Map<string, string[]> {
+  if (!coChange) {
+    return new Map(edges);
+  }
+  const merged = new Map<string, string[]>();
+  for (const [path, targets] of edges) {
+    const partners = (coChange.get(path) ?? []).filter((partner) => known.has(partner) && partner !== path);
+    merged.set(path, [...new Set([...targets, ...partners])]);
+  }
+  return merged;
 }
 
 function seedWeights(

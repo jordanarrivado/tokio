@@ -9,6 +9,8 @@ import { evaluateToolUse } from './hook';
 import { scanRepository } from './scan';
 import { serveStdio } from './mcp';
 import { formatStats, readAuditEntries, summarizeAudit } from './stats';
+import { decidePromptContext, parsePromptHookEvent } from './prompt-hook';
+import { initProject } from './init';
 import { Broker } from './tools';
 
 const AGENTS: Record<string, AgentCommand> = {
@@ -23,7 +25,9 @@ const USAGE = [
   '  tokio hook                                     PreToolUse hook: reads event JSON on stdin',
   '  tokio map <task> [--root <dir>] [--target <path>] [--budget <tokens>]',
   '  tokio stats [--root <dir>] [--since <YYYY-MM-DD>]   estimated usage from the audit log',
-  '  tokio bench <tasks.json> [--agent claude] [--repeat <n>] [--out <report.json>]'
+  '  tokio bench <tasks.json> [--agent claude] [--repeat <n>] [--out <report.json>]',
+  '  tokio prompt-hook                              UserPromptSubmit hook: adds a repo map for matching prompts',
+  '  tokio init [--root <dir>] [--force] [--dry-run]  set up Claude Code and Codex configs for a project'
 ].join('\n');
 
 async function main(argv: string[]): Promise<void> {
@@ -43,6 +47,14 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'hook') {
     await runHookCommand();
+    return;
+  }
+  if (command === 'prompt-hook') {
+    await runPromptHookCommand();
+    return;
+  }
+  if (command === 'init') {
+    await runInitCommand(rest);
     return;
   }
   if (command === 'stats') {
@@ -65,13 +77,14 @@ async function runBenchCommand(args: string[]): Promise<void> {
   const report = await runBench({
     tasks,
     agent,
+    root: process.cwd(),
     repeats: options.repeats,
     // Tokio arm: refined prompt plus the repo map, so the comparison covers scope and context.
     // This is a proxy for the MCP flow, where the agent pulls the same context on demand.
-    buildTokioPrompt: async (task) => {
+    buildTokioPrompt: async (task, workspace) => {
       const refined = refinePrompt({ rawPrompt: task, target: 'claude' }).refinedPrompt;
-      const scan = await scanRepository(process.cwd());
-      const map = buildRepoMap(scan.files, { task, budgetTokens: DEFAULT_BUDGET_TOKENS });
+      const scan = await scanRepository(workspace);
+      const map = buildRepoMap(scan.files, { task, budgetTokens: DEFAULT_BUDGET_TOKENS, coChange: scan.coChange });
       return `${refined}\n\n${map.text}`;
     }
   });
@@ -111,7 +124,7 @@ async function runMapCommand(args: string[]): Promise<void> {
   }
 
   const scan = await scanRepository(root);
-  const map = buildRepoMap(scan.files, { task, targetPath, budgetTokens });
+  const map = buildRepoMap(scan.files, { task, targetPath, budgetTokens, coChange: scan.coChange });
   const notes = [
     scan.truncated ? `Scan stopped at ${scan.files.length} files.` : undefined,
     map.omittedFiles > 0 ? `${map.omittedFiles} ranked files omitted by the budget.` : undefined
@@ -133,6 +146,53 @@ async function runStatsCommand(args: string[]): Promise<void> {
     .filter((entry) => since === undefined || new Date(entry.timestamp) >= since);
   const scope = since ? `since ${since.toISOString().slice(0, 10)}` : 'all recorded calls';
   process.stdout.write(`${formatStats(summarizeAudit(entries), scope)}\n`);
+}
+
+/** Writes the Claude Code and Codex configs for a project. Exits 1 when anything conflicts or fails. */
+async function runInitCommand(args: string[]): Promise<void> {
+  const results = await initProject({
+    root: parseRootArg(args),
+    cliPath: __filename,
+    force: args.includes('--force'),
+    dryRun: args.includes('--dry-run')
+  });
+  for (const result of results) {
+    process.stdout.write(`${result.status.padEnd(10)} ${result.path}  ${result.detail}\n`);
+  }
+  if (results.some((result) => result.status === 'conflict' || result.status === 'error')) {
+    process.exitCode = 1;
+  }
+}
+
+/**
+ * UserPromptSubmit hook. Plain stdout on exit 0 is added to the prompt as context. Every failure
+ * exits 0 with no output, so a broken map can never block the user's prompt.
+ */
+async function runPromptHookCommand(): Promise<void> {
+  try {
+    const event = parsePromptHookEvent(await readStdin());
+    if (!event) {
+      return;
+    }
+    const root = event.cwd ?? process.cwd();
+    const scan = await scanRepository(root);
+    const decision = decidePromptContext(event.prompt, scan.files, scan.coChange);
+    if (!decision.inject) {
+      return;
+    }
+
+    process.stdout.write(`${decision.text}\n`);
+    await appendAuditEntry(root, {
+      tool: 'prompt-hook',
+      inputTokens: 0,
+      outputTokens: decision.tokens,
+      files: decision.files,
+      redactions: decision.redactions,
+      blocked: false
+    });
+  } catch {
+    // Fail open: a missing or unreadable repository must not block the prompt.
+  }
 }
 
 /** Claude Code sends the tool event on stdin. Exit code 2 blocks the call and shows stderr to the agent. */

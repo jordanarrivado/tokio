@@ -224,7 +224,8 @@ export class Broker {
     const map = buildRepoMap(scan.files, {
       task,
       targetPath: optionalString(args, 'targetPath'),
-      budgetTokens
+      budgetTokens,
+      coChange: scan.coChange
     });
 
     const notes = [
