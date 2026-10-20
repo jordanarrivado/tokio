@@ -143,3 +143,14 @@ test('a field of the wrong type returns an input error naming the field, type, a
   assert.equal(outcome.isError, true);
   assert.equal(outcome.text, 'Invalid input: startLine must be an integer (got "x").');
 });
+
+test('an out-of-range number or unknown enum value returns an input error naming what is allowed', async () => {
+  const broker = new Broker(await createRepo({}));
+  const range = await broker.callTool('repo_map', { task: 'x', budgetTokens: 5 });
+  assert.equal(range.isError, true);
+  assert.equal(range.text, 'Invalid input: budgetTokens must be an integer from 200 to 8000 (got 5).');
+
+  const choice = await broker.callTool('refine_task', { task: 'x', mode: 'loud' });
+  assert.equal(choice.isError, true);
+  assert.equal(choice.text, 'Invalid input: mode must be one of: minimal, adaptive, strict (got "loud").');
+});

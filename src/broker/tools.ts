@@ -423,6 +423,14 @@ function chunkText(text: string): string[] {
   return chunks;
 }
 
+/** The subset of JSON Schema that TOOLS uses for a property. */
+interface PropertyRule {
+  type?: string;
+  enum?: readonly unknown[];
+  minimum?: number;
+  maximum?: number;
+}
+
 /** First problem with args under a tool's inputSchema, as text for the agent, or undefined when valid. */
 function validateArgs(schema: Record<string, unknown>, args: Record<string, unknown>): string | undefined {
   const required = (schema.required ?? []) as readonly string[];
@@ -431,15 +439,25 @@ function validateArgs(schema: Record<string, unknown>, args: Record<string, unkn
       return `Invalid input: ${field} is required.`;
     }
   }
-  const properties = (schema.properties ?? {}) as Record<string, { type?: string }>;
+  const properties = (schema.properties ?? {}) as Record<string, PropertyRule>;
   for (const [field, rule] of Object.entries(properties)) {
     const value = args[field];
     if (value === undefined || rule.type === undefined) {
       continue;
     }
+    const got = `(got ${JSON.stringify(value)})`;
     if (!matchesType(value, rule.type)) {
       const article = /^[aeiou]/.test(rule.type) ? 'an' : 'a';
-      return `Invalid input: ${field} must be ${article} ${rule.type} (got ${JSON.stringify(value)}).`;
+      return `Invalid input: ${field} must be ${article} ${rule.type} ${got}.`;
+    }
+    if (rule.enum && !rule.enum.includes(value)) {
+      return `Invalid input: ${field} must be one of: ${rule.enum.join(', ')} ${got}.`;
+    }
+    const tooLow = rule.minimum !== undefined && (value as number) < rule.minimum;
+    const tooHigh = rule.maximum !== undefined && (value as number) > rule.maximum;
+    if (tooLow || tooHigh) {
+      const range = rule.maximum === undefined ? `of at least ${rule.minimum}` : `from ${rule.minimum} to ${rule.maximum}`;
+      return `Invalid input: ${field} must be an integer ${range} ${got}.`;
     }
   }
   return undefined;
