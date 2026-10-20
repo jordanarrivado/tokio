@@ -129,3 +129,10 @@ test('invalid arguments return a tool error instead of throwing', async () => {
   const unknown = await broker.callTool('delete_everything', {});
   assert.equal(unknown.isError, true);
 });
+
+test('a missing required field returns an input error naming the field', async () => {
+  const broker = new Broker(await createRepo({}));
+  const outcome = await broker.callTool('repo_map', {});
+  assert.equal(outcome.isError, true);
+  assert.equal(outcome.text, 'Invalid input: task is required.');
+});

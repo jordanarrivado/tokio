@@ -142,7 +142,10 @@ export class Broker {
   async callTool(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
     let outcome: ToolOutcome;
     try {
-      outcome = await this.dispatch(name, args);
+      // Arguments are checked against the advertised schema first, so a handler never sees bad input.
+      const definition = TOOLS.find((tool) => tool.name === name);
+      const invalid = definition ? validateArgs(definition.inputSchema, args) : undefined;
+      outcome = invalid !== undefined ? { text: invalid, isError: true } : await this.dispatch(name, args);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       outcome = { text: message, isError: true, blocked: error instanceof PolicyError };
@@ -418,6 +421,17 @@ function chunkText(text: string): string[] {
     chunks.push(current);
   }
   return chunks;
+}
+
+/** First problem with args under a tool's inputSchema, as text for the agent, or undefined when valid. */
+function validateArgs(schema: Record<string, unknown>, args: Record<string, unknown>): string | undefined {
+  const required = (schema.required ?? []) as readonly string[];
+  for (const field of required) {
+    if (args[field] === undefined) {
+      return `Invalid input: ${field} is required.`;
+    }
+  }
+  return undefined;
 }
 
 function requireString(args: Record<string, unknown>, key: string): string {
