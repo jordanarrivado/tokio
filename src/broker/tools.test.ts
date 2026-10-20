@@ -291,3 +291,28 @@ test('find_symbol returns at most limit hits, default 10, then says how many mor
   assert.equal(limited.filter((line) => line.startsWith('src/handlers.ts:')).length, 3);
   assert.equal(limited[3], '9 more; narrow with targetPath');
 });
+
+test('find_symbol with no match returns an error with up to 3 close names', async () => {
+  const broker = new Broker(await createRepo({
+    'src/broker/tools.ts': BROKER_SOURCE,
+    'src/names.ts': [
+      'export function createBrokerClient() {', '}',
+      'export function brokerage() {', '}',
+      'export function BrokerError() {', '}',
+      'export function unrelated() {', '}',
+      ''
+    ].join('\n')
+  }));
+
+  const typo = await broker.callTool('find_symbol', { name: 'Brokr' });
+  assert.equal(typo.isError, true);
+  assert.equal(typo.text, 'No symbol "Brokr". Close names: Broker.');
+
+  const nothing = await broker.callTool('find_symbol', { name: 'zzzzzz' });
+  assert.equal(nothing.isError, true);
+  assert.equal(nothing.text, 'No symbol "zzzzzz".');
+
+  const many = await broker.callTool('find_symbol', { name: 'roker' });
+  assert.equal(many.isError, true);
+  assert.equal(many.text, 'No symbol "roker". Close names: Broker, brokerage, BrokerError.');
+});

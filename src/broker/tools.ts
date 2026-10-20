@@ -382,11 +382,16 @@ export class Broker {
     const name = requireString(args, 'name');
     const limit = optionalInteger(args, 'limit', MAX_SYMBOL_HITS, 1, MAX_SYMBOL_HITS);
     const scan = await scanRepository(this.root, signal);
-    const hits = scan.files
-      .flatMap((file) => extractSymbols(file.content, file.path).map((symbol) => ({ file, ...symbol })))
+    const symbols = scan.files
+      .flatMap((file) => extractSymbols(file.content, file.path).map((symbol) => ({ file, ...symbol })));
+    const hits = symbols
       .map((hit) => ({ ...hit, rank: rankSymbolName(symbolName(hit.signature), name) }))
       .filter((hit) => hit.rank >= 0)
       .sort((left, right) => left.rank - right.rank || left.file.path.localeCompare(right.file.path) || left.line - right.line);
+    if (hits.length === 0) {
+      const close = closeNames([...new Set(symbols.map((symbol) => symbolName(symbol.signature)))], name);
+      throw new Error(`No symbol "${name}".${close.length > 0 ? ` Close names: ${close.join(', ')}.` : ''}`);
+    }
 
     const shown = hits.slice(0, limit);
     const lines = shown.map((hit) => `${hit.file.path}:${hit.line}  ${hit.signature}`);
@@ -472,6 +477,31 @@ function rankSymbolName(candidate: string, wanted: string): number {
     return 1;
   }
   return lower.startsWith(target) ? 2 : -1;
+}
+
+/** Up to 3 names within edit distance 2 of wanted or containing it, ignoring case; nearest first. */
+function closeNames(names: readonly string[], wanted: string): string[] {
+  const target = wanted.toLowerCase();
+  return names
+    .filter((name) => name.length > 0)
+    .map((name) => ({ name, distance: editDistance(name.toLowerCase(), target) }))
+    .filter((entry) => entry.distance <= 2 || entry.name.toLowerCase().includes(target))
+    .sort((left, right) => left.distance - right.distance || left.name.localeCompare(right.name))
+    .slice(0, 3)
+    .map((entry) => entry.name);
+}
+
+function editDistance(left: string, right: string): number {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const current = [row];
+    for (let column = 1; column <= right.length; column += 1) {
+      const substitution = previous[column - 1] + (left[row - 1] === right[column - 1] ? 0 : 1);
+      current.push(Math.min(previous[column] + 1, current[column - 1] + 1, substitution));
+    }
+    previous = current;
+  }
+  return previous[right.length];
 }
 
 /** Line of the next top-level symbol after startLine, minus one, so a body stops before it. */
