@@ -89,3 +89,25 @@ test('stdio server keeps stdout to protocol messages only', async () => {
   assert.deepEqual(JSON.parse(lines[0]), { jsonrpc: '2.0', id: 1, result: {} });
   assert.equal((JSON.parse(lines[1]) as { id: number }).id, 2);
 });
+
+test('a timed-out call does not hold the queue: the next request runs right after', { timeout: 2000 }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-timeout-'));
+  const broker = new Broker(root);
+  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise(() => {});
+  const sent: Record<string, unknown>[] = [];
+  const server = createMcpServer(broker, (message) => {
+    sent.push(message as Record<string, unknown>);
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  // Queue the two requests in order, as serveStdio does.
+  const queue = server.handleLine(JSON.stringify({
+    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'repo_map', arguments: { task: 'x' } }
+  })).then(() => server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' })));
+  t.mock.timers.tick(10_000);
+  await queue;
+
+  // No mocked time passed after the timeout, so the ping ran well within 100 ms of it.
+  assert.equal((sent[0].result as { isError: boolean }).isError, true);
+  assert.deepEqual(sent[1], { jsonrpc: '2.0', id: 2, result: {} });
+});
