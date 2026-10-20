@@ -431,7 +431,29 @@ function validateArgs(schema: Record<string, unknown>, args: Record<string, unkn
       return `Invalid input: ${field} is required.`;
     }
   }
+  const properties = (schema.properties ?? {}) as Record<string, { type?: string }>;
+  for (const [field, rule] of Object.entries(properties)) {
+    const value = args[field];
+    if (value === undefined || rule.type === undefined) {
+      continue;
+    }
+    if (!matchesType(value, rule.type)) {
+      const article = /^[aeiou]/.test(rule.type) ? 'an' : 'a';
+      return `Invalid input: ${field} must be ${article} ${rule.type} (got ${JSON.stringify(value)}).`;
+    }
+  }
   return undefined;
+}
+
+function matchesType(value: unknown, type: string): boolean {
+  switch (type) {
+    case 'integer':
+      return typeof value === 'number' && Number.isInteger(value);
+    case 'object':
+      return typeof value === 'object' && value !== null && !Array.isArray(value);
+    default:
+      return typeof value === type;
+  }
 }
 
 function requireString(args: Record<string, unknown>, key: string): string {

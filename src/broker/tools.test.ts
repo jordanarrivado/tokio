@@ -136,3 +136,10 @@ test('a missing required field returns an input error naming the field', async (
   assert.equal(outcome.isError, true);
   assert.equal(outcome.text, 'Invalid input: task is required.');
 });
+
+test('a field of the wrong type returns an input error naming the field, type, and value', async () => {
+  const broker = new Broker(await createRepo({ 'src/auth/login.ts': LOGIN_SOURCE }));
+  const outcome = await broker.callTool('read_symbol', { path: 'src/auth/login.ts', startLine: 'x' });
+  assert.equal(outcome.isError, true);
+  assert.equal(outcome.text, 'Invalid input: startLine must be an integer (got "x").');
+});
