@@ -162,3 +162,13 @@ test('unknown extra fields are ignored and do not change the result', async () =
   assert.equal(extra.isError, undefined);
   assert.equal(extra.text, plain.text);
 });
+
+test('an unknown tool name returns an error listing the valid tools', async () => {
+  const broker = new Broker(await createRepo({}));
+  const outcome = await broker.callTool('delete_everything', {});
+  assert.equal(outcome.isError, true);
+  assert.equal(
+    outcome.text,
+    'Unknown tool: delete_everything. Valid tools: refine_task, repo_map, read_symbol, search_output, session_stats, route_task.'
+  );
+});

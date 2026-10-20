@@ -192,7 +192,7 @@ export class Broker {
       case 'route_task':
         return this.routeTask(args);
       default:
-        throw new Error(`Unknown tool: ${name}`);
+        throw new Error(`Unknown tool: ${name}. Valid tools: ${TOOLS.map((tool) => tool.name).join(', ')}.`);
     }
   }
 
