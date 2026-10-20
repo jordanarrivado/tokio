@@ -265,7 +265,7 @@ export class Broker {
   private async repoMap(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const task = requireString(args, 'task');
     const budgetTokens = optionalInteger(args, 'budgetTokens', DEFAULT_BUDGET_TOKENS, 200, MAX_BUDGET_TOKENS);
-    const scan = await scanRepository(this.root);
+    const scan = await scanRepository(this.root, signal);
     const map = buildRepoMap(scan.files, {
       task,
       targetPath: optionalString(args, 'targetPath'),
@@ -293,7 +293,7 @@ export class Broker {
     const full = args.full === true;
 
     const { absolute, relative } = await resolveRepoPath(this.root, requested);
-    const content = await readFile(absolute, 'utf8');
+    const content = await readFile(absolute, { encoding: 'utf8', signal });
     const lines = content.split(/\r?\n/);
     // Baseline: a full-file read of the same file.
     const baselineTokens = estimateTokens(content);
@@ -369,7 +369,7 @@ export class Broker {
   private async routeTask(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const task = redactSecrets(requireString(args, 'task')).text;
     const targetPath = optionalString(args, 'targetPath');
-    const scan = await scanRepository(this.root);
+    const scan = await scanRepository(this.root, signal);
     const relevantFiles = findRelevantFiles(scan.files, task, targetPath);
     const classification = classifyWorkCategory(task);
     const plan = planRoute({

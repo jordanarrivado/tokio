@@ -21,17 +21,20 @@ export interface ScanResult {
 
 /**
  * Reads safe text files under a repository root. Symlinks are skipped, so a link cannot
- * point the scan outside the root. Secret paths are never read.
+ * point the scan outside the root. Secret paths are never read. An aborted signal stops the scan
+ * with an AbortError.
  */
-export async function scanRepository(root: string): Promise<ScanResult> {
+export async function scanRepository(root: string, signal?: AbortSignal): Promise<ScanResult> {
   const files: RepoFile[] = [];
   let truncated = false;
 
   async function walk(directory: string): Promise<void> {
+    signal?.throwIfAborted();
     const entries = await readdir(directory, { withFileTypes: true });
     entries.sort((left, right) => left.name.localeCompare(right.name));
 
     for (const entry of entries) {
+      signal?.throwIfAborted();
       if (files.length >= MAX_SCANNED_FILES) {
         truncated = true;
         return;
@@ -53,7 +56,7 @@ export async function scanRepository(root: string): Promise<ScanResult> {
       if (info.size > MAX_FILE_BYTES) {
         continue;
       }
-      files.push({ path, content: await readFile(fullPath, 'utf8') });
+      files.push({ path, content: await readFile(fullPath, { encoding: 'utf8', signal }) });
     }
   }
 
