@@ -344,3 +344,20 @@ test('find_symbol limits hits to targetPath and blocks a targetPath outside the 
   assert.equal(outside.isError, true);
   assert.equal(outside.text, 'Blocked: path is outside the repository.');
 });
+
+test('find_symbol obeys input validation, the 10s timeout, and cancellation', { timeout: 2000 }, async (t) => {
+  const broker = new Broker(await createRepo({ 'src/broker/tools.ts': BROKER_SOURCE }));
+  const invalid = await broker.callTool('find_symbol', { name: 'Broker', limit: 11 });
+  assert.equal(invalid.text, 'Invalid input: limit must be an integer from 1 to 10 (got 11).');
+
+  const cancel = new AbortController();
+  cancel.abort();
+  const cancelled = await broker.callTool('find_symbol', { name: 'Broker' }, cancel.signal);
+  assert.equal(cancelled.text, 'Cancelled.');
+
+  (broker as unknown as Record<string, unknown>).findSymbol = () => new Promise(() => {});
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = broker.callTool('find_symbol', { name: 'Broker' });
+  t.mock.timers.tick(10_000);
+  assert.equal((await pending).text, 'Timed out after 10s. Narrow targetPath or the request.');
+});
