@@ -47,19 +47,21 @@ export function createMcpServer(broker: Broker, send: (message: object) => void)
       return;
     }
 
-    const isNotification = !('id' in message);
+    const id = message.id;
+    // Notifications never get a response, and neither does a cancelled request, as MCP requires.
+    const isRequest = 'id' in message;
+    const reply = (response: object): void => {
+      if (isRequest && !signal.aborted) {
+        send(response);
+      }
+    };
     try {
       const result = await dispatch(message.method, message.params, broker, signal);
-      // A cancelled request gets no response, as MCP requires.
-      if (!isNotification && !signal.aborted) {
-        send({ jsonrpc: JSON_RPC_VERSION, id: message.id, result });
-      }
+      reply({ jsonrpc: JSON_RPC_VERSION, id, result });
     } catch (error) {
-      if (!isNotification && !signal.aborted) {
-        const code = error instanceof RpcError ? error.code : INTERNAL_ERROR;
-        const text = error instanceof Error ? error.message : String(error);
-        send(errorResponse(message.id, code, text));
-      }
+      const code = error instanceof RpcError ? error.code : INTERNAL_ERROR;
+      const text = error instanceof Error ? error.message : String(error);
+      reply(errorResponse(id, code, text));
     }
   }
 

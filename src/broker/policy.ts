@@ -91,9 +91,9 @@ export async function resolveRepoPath(root: string, requested: string): Promise<
     throw new PolicyError(`Blocked: ${normalized} is a secret path.`);
   }
 
-  const relativePath = relative(root, resolve(root, normalized)).replaceAll('\\', '/');
+  const relativePath = toRepoRelative(root, normalized);
   if (isOutside(relativePath)) {
-    throw new PolicyError('Blocked: path is outside the repository.');
+    throw new PolicyError(OUTSIDE_REPOSITORY);
   }
   if (isSecretPath(relativePath)) {
     throw new PolicyError(`Blocked: ${relativePath} is a secret path.`);
@@ -122,11 +122,19 @@ export async function resolveRepoPath(root: string, requested: string): Promise<
  * Blocks paths outside the repository, like resolveRepoPath, but does not require the path to exist.
  */
 export function resolveRepoScope(root: string, requested: string): string {
-  const relativePath = relative(root, resolve(root, requested.replaceAll('\\', '/'))).replaceAll('\\', '/');
+  const relativePath = toRepoRelative(root, requested);
+  // isOutside counts the root itself as outside, which is right for a file but not for a scope.
   if (relativePath !== '' && isOutside(relativePath)) {
-    throw new PolicyError('Blocked: path is outside the repository.');
+    throw new PolicyError(OUTSIDE_REPOSITORY);
   }
   return relativePath;
+}
+
+const OUTSIDE_REPOSITORY = 'Blocked: path is outside the repository.';
+
+/** Lexical repo-relative path with forward slashes. Does not touch the file system. */
+function toRepoRelative(root: string, requested: string): string {
+  return relative(root, resolve(root, requested.replaceAll('\\', '/'))).replaceAll('\\', '/');
 }
 
 function isOutside(relativePath: string): boolean {

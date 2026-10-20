@@ -4,7 +4,7 @@ import { refinePrompt } from '../core/refine';
 import { classifyWorkCategory } from '../core/category';
 import type { Mode, PromptTarget, WorkCategory } from '../core/types';
 import { countTermHits, extractSearchTerms } from '../context/discovery';
-import { buildRepoMap, extractSymbols } from '../context/repomap';
+import { buildRepoMap, extractSymbols, type RepoFile } from '../context/repomap';
 import { estimateTokens } from '../core/tokens';
 import { appendAuditEntry } from './audit';
 import { PolicyError, redactSecrets, resolveRepoPath, resolveRepoScope } from './policy';
@@ -32,8 +32,8 @@ export interface ToolOutcome {
   estimate?: boolean;
   /** Routing decision for the audit log. Tier and confidence only. */
   route?: { tier: string; confidence: string };
-  /** Set when the call did not finish normally, so the audit log can count it. */
-  outcome?: 'timeout' | 'cancelled';
+  /** Set when the call did not finish normally. Recorded as the audit entry's outcome. */
+  ended?: 'timeout' | 'cancelled';
 }
 
 const MODES: readonly Mode[] = ['minimal', 'adaptive', 'strict'];
@@ -51,6 +51,13 @@ const CHUNK_CHARS = 800;
 const MAX_STORED_OUTPUTS = 20;
 const TOOL_TIMEOUT_MS = 10_000;
 const MAX_SYMBOL_HITS = 10;
+
+const CANCELLED: ToolOutcome = { text: 'Cancelled.', isError: true, ended: 'cancelled' };
+const TIMED_OUT: ToolOutcome = {
+  text: `Timed out after ${TOOL_TIMEOUT_MS / 1000}s. Narrow targetPath or the request.`,
+  isError: true,
+  ended: 'timeout'
+};
 
 const TOOLS: readonly ToolDefinition[] = [
   {
@@ -162,7 +169,9 @@ export class Broker {
     try {
       // Arguments are checked against the advertised schema first, so a handler never sees bad input.
       const definition = TOOLS.find((tool) => tool.name === name);
-      const invalid = definition ? validateArgs(definition.inputSchema, args) : undefined;
+      const invalid = definition
+        ? validateArgs(definition.inputSchema, args)
+        : `Unknown tool: ${name}. Valid tools: ${TOOLS.map((tool) => tool.name).join(', ')}.`;
       outcome = invalid !== undefined ? { text: invalid, isError: true } : await this.dispatchWithTimeout(name, args, cancel);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -187,7 +196,7 @@ export class Broker {
         blocked: outcome.blocked ?? false,
         ...(baseline !== undefined ? { baselineTokens: baseline, savedTokens: baseline - returned } : {}),
         ...(outcome.route ? { route: outcome.route } : {}),
-        ...(outcome.outcome ? { outcome: outcome.outcome } : {})
+        ...(outcome.ended ? { outcome: outcome.ended } : {})
       });
     } catch (error) {
       // The audit log must not break a tool call; report the failure on stderr, which MCP does not use.
@@ -203,33 +212,24 @@ export class Broker {
   private async dispatchWithTimeout(name: string, args: Record<string, unknown>, cancel?: AbortSignal): Promise<ToolOutcome> {
     // Cancelled while still queued: the handler never runs.
     if (cancel?.aborted) {
-      return { text: 'Cancelled.', isError: true, outcome: 'cancelled' };
+      return CANCELLED;
     }
     const controller = new AbortController();
-    let timer: NodeJS.Timeout | undefined;
-    let onCancel: (() => void) | undefined;
+    let stop: (outcome: ToolOutcome) => void = () => {};
     const stopped = new Promise<ToolOutcome>((resolve) => {
-      timer = setTimeout(() => {
+      stop = (outcome) => {
         controller.abort();
-        resolve({
-          text: `Timed out after ${TOOL_TIMEOUT_MS / 1000}s. Narrow targetPath or the request.`,
-          isError: true,
-          outcome: 'timeout'
-        });
-      }, TOOL_TIMEOUT_MS);
-      onCancel = () => {
-        controller.abort();
-        resolve({ text: 'Cancelled.', isError: true, outcome: 'cancelled' });
+        resolve(outcome);
       };
-      cancel?.addEventListener('abort', onCancel, { once: true });
     });
+    const timer = setTimeout(() => stop(TIMED_OUT), TOOL_TIMEOUT_MS);
+    const onCancel = (): void => stop(CANCELLED);
+    cancel?.addEventListener('abort', onCancel, { once: true });
     try {
       return await Promise.race([this.dispatch(name, args, controller.signal), stopped]);
     } finally {
       clearTimeout(timer);
-      if (onCancel) {
-        cancel?.removeEventListener('abort', onCancel);
-      }
+      cancel?.removeEventListener('abort', onCancel);
     }
   }
 
@@ -250,19 +250,20 @@ export class Broker {
       case 'find_symbol':
         return this.findSymbol(args, signal);
       default:
-        throw new Error(`Unknown tool: ${name}. Valid tools: ${TOOLS.map((tool) => tool.name).join(', ')}.`);
+        // callTool rejects unknown names before dispatch; this only guards the switch.
+        throw new Error(`Unknown tool: ${name}`);
     }
   }
 
   private refineTask(args: Record<string, unknown>): ToolOutcome {
     const rawTask = requireString(args, 'task');
     const redacted = redactSecrets(rawTask);
-    const category = optionalEnum(args, 'category', CATEGORIES)
+    const category = (args.category as WorkCategory | undefined)
       ?? classifyWorkCategory(redacted.text).category;
     const result = refinePrompt({
       rawPrompt: redacted.text,
-      target: optionalEnum(args, 'target', TARGETS) ?? 'claude',
-      mode: optionalEnum(args, 'mode', MODES),
+      target: (args.target as PromptTarget | undefined) ?? 'claude',
+      mode: args.mode as Mode | undefined,
       category,
       targetPath: optionalString(args, 'targetPath')
     });
@@ -280,8 +281,8 @@ export class Broker {
 
   private async repoMap(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const task = requireString(args, 'task');
-    const budgetTokens = optionalInteger(args, 'budgetTokens', DEFAULT_BUDGET_TOKENS, 200, MAX_BUDGET_TOKENS);
-    const scan = await scanRepository(this.root, signal);
+    const budgetTokens = optionalInteger(args, 'budgetTokens', DEFAULT_BUDGET_TOKENS);
+    const scan = await scanRepository(this.root, { signal });
     const map = buildRepoMap(scan.files, {
       task,
       targetPath: optionalString(args, 'targetPath'),
@@ -304,8 +305,9 @@ export class Broker {
 
   private async readSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const requested = requireString(args, 'path');
-    const startLine = optionalInteger(args, 'startLine', 1, 1, Number.MAX_SAFE_INTEGER);
-    const explicitEnd = optionalInteger(args, 'endLine', 0, 0, Number.MAX_SAFE_INTEGER);
+    const startLine = optionalInteger(args, 'startLine', 1);
+    // 0 means no explicit end; the schema already rejects an endLine below 1.
+    const explicitEnd = optionalInteger(args, 'endLine', 0);
     const full = args.full === true;
 
     const { absolute, relative } = await resolveRepoPath(this.root, requested);
@@ -347,7 +349,7 @@ export class Broker {
   private searchOutput(args: Record<string, unknown>): ToolOutcome {
     const id = requireString(args, 'id');
     const query = requireString(args, 'query');
-    const limit = optionalInteger(args, 'limit', 3, 1, 10);
+    const limit = optionalInteger(args, 'limit', 3);
     const stored = this.storedOutputs.get(id);
     if (stored === undefined) {
       throw new Error(`No stored output with id ${id}. It may have expired when the server restarted.`);
@@ -381,19 +383,23 @@ export class Broker {
   /** Top-level symbols ranked against a name: exact, then case-insensitive, then prefix. Ties sort by path. */
   private async findSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const name = requireString(args, 'name');
-    const limit = optionalInteger(args, 'limit', MAX_SYMBOL_HITS, 1, MAX_SYMBOL_HITS);
+    const limit = optionalInteger(args, 'limit', MAX_SYMBOL_HITS);
     const targetPath = optionalString(args, 'targetPath');
     const scope = targetPath === undefined ? '' : resolveRepoScope(this.root, targetPath);
-    const scan = await scanRepository(this.root, signal);
-    const symbols = scan.files
-      .filter((file) => scope === '' || file.path === scope || file.path.startsWith(`${scope}/`))
-      .flatMap((file) => extractSymbols(file.content, file.path).map((symbol) => ({ file, ...symbol })));
-    const hits = symbols
-      .map((hit) => ({ ...hit, rank: rankSymbolName(symbolName(hit.signature), name) }))
+    const scan = await scanRepository(this.root, { signal, history: false });
+    const inScope = scan.files
+      .filter((file) => scope === '' || file.path === scope || file.path.startsWith(`${scope}/`));
+    const symbolsIn = (files: readonly RepoFile[]) => files.flatMap((file) => extractSymbols(file.content, file.path)
+      .map((symbol) => ({ file, ...symbol, name: symbolName(symbol.signature) })));
+
+    // Every hit's name contains the query ignoring case, so only files containing it need parsing.
+    const query = name.toLowerCase();
+    const hits = symbolsIn(inScope.filter((file) => file.content.toLowerCase().includes(query)))
+      .map((symbol) => ({ ...symbol, rank: rankSymbolName(symbol.name, name) }))
       .filter((hit) => hit.rank >= 0)
       .sort((left, right) => left.rank - right.rank || left.file.path.localeCompare(right.file.path) || left.line - right.line);
     if (hits.length === 0) {
-      const close = closeNames([...new Set(symbols.map((symbol) => symbolName(symbol.signature)))], name);
+      const close = closeNames([...new Set(symbolsIn(inScope).map((symbol) => symbol.name))], name);
       throw new Error(`No symbol "${name}".${close.length > 0 ? ` Close names: ${close.join(', ')}.` : ''}`);
     }
 
@@ -418,7 +424,7 @@ export class Broker {
   private async routeTask(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const task = redactSecrets(requireString(args, 'task')).text;
     const targetPath = optionalString(args, 'targetPath');
-    const scan = await scanRepository(this.root, signal);
+    const scan = await scanRepository(this.root, { signal, history: false });
     const relevantFiles = findRelevantFiles(scan.files, task, targetPath);
     const classification = classifyWorkCategory(task);
     const plan = planRoute({
@@ -561,7 +567,7 @@ function chunkText(text: string): string[] {
 
 /** The subset of JSON Schema that TOOLS uses for a property. */
 interface PropertyRule {
-  type?: string;
+  type: string;
   enum?: readonly unknown[];
   minimum?: number;
   maximum?: number;
@@ -578,7 +584,7 @@ function validateArgs(schema: Record<string, unknown>, args: Record<string, unkn
   const properties = (schema.properties ?? {}) as Record<string, PropertyRule>;
   for (const [field, rule] of Object.entries(properties)) {
     const value = args[field];
-    if (value === undefined || rule.type === undefined) {
+    if (value === undefined) {
       continue;
     }
     const got = `(got ${JSON.stringify(value)})`;
@@ -600,14 +606,7 @@ function validateArgs(schema: Record<string, unknown>, args: Record<string, unkn
 }
 
 function matchesType(value: unknown, type: string): boolean {
-  switch (type) {
-    case 'integer':
-      return typeof value === 'number' && Number.isInteger(value);
-    case 'object':
-      return typeof value === 'object' && value !== null && !Array.isArray(value);
-    default:
-      return typeof value === type;
-  }
+  return type === 'integer' ? typeof value === 'number' && Number.isInteger(value) : typeof value === type;
 }
 
 function requireString(args: Record<string, unknown>, key: string): string {
@@ -623,24 +622,7 @@ function optionalString(args: Record<string, unknown>, key: string): string | un
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
-function optionalEnum<T extends string>(args: Record<string, unknown>, key: string, allowed: readonly T[]): T | undefined {
-  const value = args[key];
-  if (value === undefined) {
-    return undefined;
-  }
-  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
-    throw new Error(`${key} must be one of: ${allowed.join(', ')}.`);
-  }
-  return value as T;
-}
-
-function optionalInteger(args: Record<string, unknown>, key: string, fallback: number, min: number, max: number): number {
-  const value = args[key];
-  if (value === undefined) {
-    return fallback;
-  }
-  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
-    throw new Error(`${key} must be an integer from ${min} to ${max}.`);
-  }
-  return value;
+/** Type and range are already checked by validateArgs against the schema; this only applies the default. */
+function optionalInteger(args: Record<string, unknown>, key: string, fallback: number): number {
+  return (args[key] as number | undefined) ?? fallback;
 }

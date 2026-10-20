@@ -22,9 +22,12 @@ export interface ScanResult {
 /**
  * Reads safe text files under a repository root. Symlinks are skipped, so a link cannot
  * point the scan outside the root. Secret paths are never read. An aborted signal stops the scan
- * with an AbortError.
+ * with an AbortError. history: false skips the git co-change read for callers that do not use it.
  */
-export async function scanRepository(root: string, signal?: AbortSignal): Promise<ScanResult> {
+export async function scanRepository(
+  root: string,
+  { signal, history = true }: { signal?: AbortSignal; history?: boolean } = {}
+): Promise<ScanResult> {
   const files: RepoFile[] = [];
   let truncated = false;
 
@@ -61,6 +64,9 @@ export async function scanRepository(root: string, signal?: AbortSignal): Promis
   }
 
   await walk(root);
-  const coChange = await readCoChangeLinks(root, new Set(files.map((file) => file.path)));
+  signal?.throwIfAborted();
+  const coChange = history
+    ? await readCoChangeLinks(root, new Set(files.map((file) => file.path)))
+    : new Map<string, string[]>();
   return { files, truncated, coChange };
 }

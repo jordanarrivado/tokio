@@ -9,14 +9,53 @@ import { Broker } from './tools';
 
 const CLI = join(__dirname, 'cli.js');
 
-async function setup(): Promise<{ root: string; sent: Record<string, unknown>[]; handle: (line: string) => Promise<void> }> {
+/** Builds a server on a temp repo. stub can replace Broker handlers before the server starts. */
+async function setup(stub?: (broker: Broker) => void): Promise<{
+  root: string;
+  sent: Record<string, unknown>[];
+  handle: (line: string) => Promise<void>;
+}> {
   const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-'));
   await writeFile(join(root, 'app.ts'), 'export function run() {}\n', 'utf8');
+  const broker = new Broker(root);
+  stub?.(broker);
   const sent: Record<string, unknown>[] = [];
-  const server = createMcpServer(new Broker(root), (message) => {
+  const server = createMcpServer(broker, (message) => {
     sent.push(message as Record<string, unknown>);
   });
   return { root, sent, handle: (line) => server.handleLine(line) };
+}
+
+/** Replaces a private Broker handler on one instance, so a test controls what it returns. */
+function stubHandler(broker: Broker, handler: string, fn: (...args: never[]) => unknown): void {
+  (broker as unknown as Record<string, unknown>)[handler] = fn;
+}
+
+/** A handler that never settles, for the timeout and cancellation paths. */
+const HANG = (): Promise<never> => new Promise(() => {});
+
+/** A handler that stays pending until the test calls release. */
+function deferredHandler(): { handler: () => Promise<unknown>; release: () => void } {
+  let settle: () => void = () => {};
+  return {
+    handler: () => new Promise((resolve) => {
+      settle = () => resolve({ text: 'map' });
+    }),
+    release: () => settle()
+  };
+}
+
+/** Waits one event-loop turn, so queued requests reach their handlers. */
+function nextTurn(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function callLine(id: number, name = 'repo_map'): string {
+  return JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: { task: 'x' } } });
+}
+
+function cancelLine(requestId: unknown): string {
+  return JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId } });
 }
 
 test('initialize advertises the tools capability and usage instructions', async () => {
@@ -91,21 +130,13 @@ test('stdio server keeps stdout to protocol messages only', async () => {
 });
 
 test('a timed-out call does not hold the queue: the next request runs right after', { timeout: 2000 }, async (t) => {
-  const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-timeout-'));
-  const broker = new Broker(root);
-  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise(() => {});
-  const sent: Record<string, unknown>[] = [];
-  const server = createMcpServer(broker, (message) => {
-    sent.push(message as Record<string, unknown>);
-  });
+  const { sent, handle } = await setup((broker) => stubHandler(broker, 'repoMap', HANG));
   t.mock.timers.enable({ apis: ['setTimeout'] });
 
   // Queue the two requests in order, as serveStdio does.
-  const queue = server.handleLine(JSON.stringify({
-    jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'repo_map', arguments: { task: 'x' } }
-  })).then(() => server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' })));
+  const queue = handle(callLine(1)).then(() => handle(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' })));
   // Let the queued call start, so its 10s timer exists before the clock moves.
-  await new Promise((resolve) => setImmediate(resolve));
+  await nextTurn();
   t.mock.timers.tick(10_000);
   await queue;
 
@@ -114,30 +145,16 @@ test('a timed-out call does not hold the queue: the next request runs right afte
   assert.deepEqual(sent[1], { jsonrpc: '2.0', id: 2, result: {} });
 });
 
-function callLine(id: number, name = 'repo_map'): string {
-  return JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: { task: 'x' } } });
-}
-
-function cancelLine(requestId: unknown): string {
-  return JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId } });
-}
-
 test('cancelling an in-flight call aborts its signal and sends no response for it', { timeout: 2000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-cancel-'));
-  const broker = new Broker(root);
   let received: AbortSignal | undefined;
-  (broker as unknown as Record<string, unknown>).repoMap = (_args: unknown, signal: AbortSignal) => {
+  const { sent, handle } = await setup((broker) => stubHandler(broker, 'repoMap', (_args: unknown, signal: AbortSignal) => {
     received = signal;
-    return new Promise(() => {});
-  };
-  const sent: Record<string, unknown>[] = [];
-  const server = createMcpServer(broker, (message) => {
-    sent.push(message as Record<string, unknown>);
-  });
+    return HANG();
+  }));
 
-  const call = server.handleLine(callLine(1));
-  await new Promise((resolve) => setImmediate(resolve));
-  await server.handleLine(cancelLine(1));
+  const call = handle(callLine(1));
+  await nextTurn();
+  await handle(cancelLine(1));
   await call;
 
   assert.equal(received?.aborted, true);
@@ -145,30 +162,24 @@ test('cancelling an in-flight call aborts its signal and sends no response for i
 });
 
 test('a cancelled queued call never runs and gets no response', { timeout: 2000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-cancel-queued-'));
-  const broker = new Broker(root);
-  let release: () => void = () => {};
+  const blocker = deferredHandler();
   const runs: string[] = [];
-  (broker as unknown as Record<string, unknown>).repoMap = () => {
-    runs.push('repo_map');
-    return new Promise((resolve) => {
-      release = () => resolve({ text: 'map' });
+  const { sent, handle } = await setup((broker) => {
+    stubHandler(broker, 'repoMap', () => {
+      runs.push('repo_map');
+      return blocker.handler();
     });
-  };
-  (broker as unknown as Record<string, unknown>).routeTask = async () => {
-    runs.push('route_task');
-    return { text: 'route', estimate: false };
-  };
-  const sent: Record<string, unknown>[] = [];
-  const server = createMcpServer(broker, (message) => {
-    sent.push(message as Record<string, unknown>);
+    stubHandler(broker, 'routeTask', async () => {
+      runs.push('route_task');
+      return { text: 'route', estimate: false };
+    });
   });
 
-  void server.handleLine(callLine(1));
-  const queued = server.handleLine(callLine(2, 'route_task'));
-  void server.handleLine(cancelLine(2));
-  await new Promise((resolve) => setImmediate(resolve));
-  release();
+  void handle(callLine(1));
+  const queued = handle(callLine(2, 'route_task'));
+  void handle(cancelLine(2));
+  await nextTurn();
+  blocker.release();
   await queued;
 
   assert.deepEqual(runs, ['repo_map']);
@@ -190,24 +201,16 @@ test('cancelling an unknown or finished request is ignored without a response or
 });
 
 test('cancelling one request leaves the others answered and in order', { timeout: 2000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-cancel-order-'));
-  const broker = new Broker(root);
-  let release: () => void = () => {};
-  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise((resolve) => {
-    release = () => resolve({ text: 'map' });
-  });
-  const sent: Record<string, unknown>[] = [];
-  const server = createMcpServer(broker, (message) => {
-    sent.push(message as Record<string, unknown>);
-  });
+  const blocker = deferredHandler();
+  const { sent, handle } = await setup((broker) => stubHandler(broker, 'repoMap', blocker.handler));
 
-  void server.handleLine(callLine(1));
-  void server.handleLine(callLine(2));
-  void server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }));
-  const last = server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list' }));
-  void server.handleLine(cancelLine(2));
-  await new Promise((resolve) => setImmediate(resolve));
-  release();
+  void handle(callLine(1));
+  void handle(callLine(2));
+  void handle(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }));
+  const last = handle(JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list' }));
+  void handle(cancelLine(2));
+  await nextTurn();
+  blocker.release();
   await last;
 
   assert.deepEqual(sent.map((message) => message.id), [1, 3, 4]);

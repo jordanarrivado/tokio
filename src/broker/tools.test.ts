@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { AUDIT_DIRECTORY, AUDIT_FILE } from './audit';
+import { readAuditEntries } from './stats';
 import { Broker } from './tools';
 
 const LOGIN_SOURCE = [
@@ -27,6 +28,14 @@ async function createRepo(files: Record<string, string>): Promise<string> {
   }
   return root;
 }
+
+/** Replaces a private Broker handler on one instance, so a test controls what it returns. */
+function stubHandler(broker: Broker, handler: string, fn: (...args: never[]) => unknown): void {
+  (broker as unknown as Record<string, unknown>)[handler] = fn;
+}
+
+/** A handler that never settles, for the timeout and cancellation paths. */
+const HANG = (): Promise<never> => new Promise(() => {});
 
 test('refine_task redacts secrets before refining and records only their kinds', async () => {
   const broker = new Broker(await createRepo({}));
@@ -176,11 +185,10 @@ test('an unknown tool name returns an error listing the valid tools', async () =
 test('the tool handler is never invoked on invalid input', async () => {
   const broker = new Broker(await createRepo({}));
   let calls = 0;
-  // Replace the private handler on this instance with a spy.
-  (broker as unknown as Record<string, unknown>).repoMap = async () => {
+  stubHandler(broker, 'repoMap', async () => {
     calls += 1;
     return { text: 'spy' };
-  };
+  });
   await broker.callTool('repo_map', {});
   await broker.callTool('repo_map', { task: 7 });
   await broker.callTool('repo_map', { task: 'x', budgetTokens: 5 });
@@ -192,7 +200,7 @@ test('the tool handler is never invoked on invalid input', async () => {
 
 test('a call still running at 10s returns a timeout error', { timeout: 2000 }, async (t) => {
   const broker = new Broker(await createRepo({}));
-  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise(() => {});
+  stubHandler(broker, 'repoMap', HANG);
   t.mock.timers.enable({ apis: ['setTimeout'] });
 
   const pending = broker.callTool('repo_map', { task: 'x' });
@@ -205,24 +213,23 @@ test('a call still running at 10s returns a timeout error', { timeout: 2000 }, a
 test('a timed-out call is recorded in the audit log with outcome timeout', { timeout: 2000 }, async (t) => {
   const root = await createRepo({});
   const broker = new Broker(root);
-  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise(() => {});
+  stubHandler(broker, 'repoMap', HANG);
   t.mock.timers.enable({ apis: ['setTimeout'] });
 
   const pending = broker.callTool('repo_map', { task: 'x' });
   t.mock.timers.tick(10_000);
   await pending;
 
-  const lines = (await readFile(join(root, AUDIT_DIRECTORY, AUDIT_FILE), 'utf8')).trim().split('\n');
-  const entry = JSON.parse(lines[lines.length - 1]) as { tool: string; outcome?: string };
-  assert.equal(entry.tool, 'repo_map');
-  assert.equal(entry.outcome, 'timeout');
+  const entry = (await readAuditEntries(root)).at(-1);
+  assert.equal(entry?.tool, 'repo_map');
+  assert.equal(entry?.outcome, 'timeout');
 });
 
 test('a call that finishes before 10s is unaffected by the timeout', { timeout: 2000 }, async (t) => {
   const broker = new Broker(await createRepo({}));
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  (broker as unknown as Record<string, unknown>).repoMap = () =>
-    new Promise((resolve) => setTimeout(() => resolve({ text: 'map', baselineTokens: 10 }), 9_999));
+  stubHandler(broker, 'repoMap', () =>
+    new Promise((resolve) => setTimeout(() => resolve({ text: 'map', baselineTokens: 10 }), 9_999)));
 
   const pending = broker.callTool('repo_map', { task: 'x' });
   t.mock.timers.tick(9_999);
@@ -234,7 +241,7 @@ test('a call that finishes before 10s is unaffected by the timeout', { timeout: 
 test('cancelled calls are recorded in the audit log with outcome cancelled', { timeout: 2000 }, async () => {
   const root = await createRepo({});
   const broker = new Broker(root);
-  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise(() => {});
+  stubHandler(broker, 'repoMap', HANG);
 
   const running = new AbortController();
   const pending = broker.callTool('repo_map', { task: 'x' }, running.signal);
@@ -245,8 +252,7 @@ test('cancelled calls are recorded in the audit log with outcome cancelled', { t
   queued.abort();
   await broker.callTool('route_task', { task: 'x' }, queued.signal);
 
-  const lines = (await readFile(join(root, AUDIT_DIRECTORY, AUDIT_FILE), 'utf8')).trim().split('\n');
-  const entries = lines.map((line) => JSON.parse(line) as { tool: string; outcome?: string });
+  const entries = await readAuditEntries(root);
   assert.deepEqual(entries.map((entry) => [entry.tool, entry.outcome]), [
     ['repo_map', 'cancelled'],
     ['route_task', 'cancelled']
@@ -355,7 +361,7 @@ test('find_symbol obeys input validation, the 10s timeout, and cancellation', { 
   const cancelled = await broker.callTool('find_symbol', { name: 'Broker' }, cancel.signal);
   assert.equal(cancelled.text, 'Cancelled.');
 
-  (broker as unknown as Record<string, unknown>).findSymbol = () => new Promise(() => {});
+  stubHandler(broker, 'findSymbol', HANG);
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const pending = broker.callTool('find_symbol', { name: 'Broker' });
   t.mock.timers.tick(10_000);

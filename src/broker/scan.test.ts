@@ -36,5 +36,5 @@ test('stops with an AbortError once its signal is aborted', async () => {
   const root = await createRepo({ 'src/app.ts': 'export const app = 1;\n' });
   const controller = new AbortController();
   controller.abort();
-  await assert.rejects(scanRepository(root, controller.signal), { name: 'AbortError' });
+  await assert.rejects(scanRepository(root, { signal: controller.signal }), { name: 'AbortError' });
 });
