@@ -187,6 +187,10 @@ export class Broker {
    * Either one resolves the call at once, so a stuck handler cannot hold the caller.
    */
   private async dispatchWithTimeout(name: string, args: Record<string, unknown>, cancel?: AbortSignal): Promise<ToolOutcome> {
+    // Cancelled while still queued: the handler never runs.
+    if (cancel?.aborted) {
+      return { text: 'Cancelled.', isError: true, outcome: 'cancelled' };
+    }
     const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
     let onCancel: (() => void) | undefined;

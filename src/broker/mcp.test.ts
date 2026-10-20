@@ -143,3 +143,34 @@ test('cancelling an in-flight call aborts its signal and sends no response for i
   assert.equal(received?.aborted, true);
   assert.equal(sent.length, 0);
 });
+
+test('a cancelled queued call never runs and gets no response', { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-cancel-queued-'));
+  const broker = new Broker(root);
+  let release: () => void = () => {};
+  const runs: string[] = [];
+  (broker as unknown as Record<string, unknown>).repoMap = () => {
+    runs.push('repo_map');
+    return new Promise((resolve) => {
+      release = () => resolve({ text: 'map' });
+    });
+  };
+  (broker as unknown as Record<string, unknown>).routeTask = async () => {
+    runs.push('route_task');
+    return { text: 'route', estimate: false };
+  };
+  const sent: Record<string, unknown>[] = [];
+  const server = createMcpServer(broker, (message) => {
+    sent.push(message as Record<string, unknown>);
+  });
+
+  void server.handleLine(callLine(1));
+  const queued = server.handleLine(callLine(2, 'route_task'));
+  void server.handleLine(cancelLine(2));
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  await queued;
+
+  assert.deepEqual(runs, ['repo_map']);
+  assert.deepEqual(sent.map((message) => message.id), [1]);
+});
