@@ -189,3 +189,15 @@ test('the tool handler is never invoked on invalid input', async () => {
   await broker.callTool('repo_map', { task: 'x' });
   assert.equal(calls, 1);
 });
+
+test('a call still running at 10s returns a timeout error', { timeout: 2000 }, async (t) => {
+  const broker = new Broker(await createRepo({}));
+  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise(() => {});
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const pending = broker.callTool('repo_map', { task: 'x' });
+  t.mock.timers.tick(10_000);
+  const outcome = await pending;
+  assert.equal(outcome.isError, true);
+  assert.equal(outcome.text, 'Timed out after 10s. Narrow targetPath or the request.');
+});

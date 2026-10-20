@@ -47,6 +47,7 @@ const MAX_READ_LINES = 200;
 const MAX_SEARCH_RESULT_TOKENS = 1500;
 const CHUNK_CHARS = 800;
 const MAX_STORED_OUTPUTS = 20;
+const TOOL_TIMEOUT_MS = 10_000;
 
 const TOOLS: readonly ToolDefinition[] = [
   {
@@ -145,7 +146,7 @@ export class Broker {
       // Arguments are checked against the advertised schema first, so a handler never sees bad input.
       const definition = TOOLS.find((tool) => tool.name === name);
       const invalid = definition ? validateArgs(definition.inputSchema, args) : undefined;
-      outcome = invalid !== undefined ? { text: invalid, isError: true } : await this.dispatch(name, args);
+      outcome = invalid !== undefined ? { text: invalid, isError: true } : await this.dispatchWithTimeout(name, args);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       outcome = { text: message, isError: true, blocked: error instanceof PolicyError };
@@ -175,6 +176,22 @@ export class Broker {
       process.stderr.write(`Tokio audit write failed: ${error instanceof Error ? error.message : String(error)}\n`);
     }
     return outcome;
+  }
+
+  /** Resolves with a timeout error once TOOL_TIMEOUT_MS passes, so a stuck handler cannot hold the caller. */
+  private async dispatchWithTimeout(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<ToolOutcome>((resolve) => {
+      timer = setTimeout(() => resolve({
+        text: `Timed out after ${TOOL_TIMEOUT_MS / 1000}s. Narrow targetPath or the request.`,
+        isError: true
+      }), TOOL_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([this.dispatch(name, args), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async dispatch(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
