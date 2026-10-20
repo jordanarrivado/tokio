@@ -154,3 +154,11 @@ test('an out-of-range number or unknown enum value returns an input error naming
   assert.equal(choice.isError, true);
   assert.equal(choice.text, 'Invalid input: mode must be one of: minimal, adaptive, strict (got "loud").');
 });
+
+test('unknown extra fields are ignored and do not change the result', async () => {
+  const root = await createRepo({ 'src/auth/login.ts': LOGIN_SOURCE });
+  const plain = await new Broker(root).callTool('read_symbol', { path: 'src/auth/login.ts', startLine: 3 });
+  const extra = await new Broker(root).callTool('read_symbol', { path: 'src/auth/login.ts', startLine: 3, start_line: 9 });
+  assert.equal(extra.isError, undefined);
+  assert.equal(extra.text, plain.text);
+});
