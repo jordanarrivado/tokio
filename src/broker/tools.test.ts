@@ -201,3 +201,19 @@ test('a call still running at 10s returns a timeout error', { timeout: 2000 }, a
   assert.equal(outcome.isError, true);
   assert.equal(outcome.text, 'Timed out after 10s. Narrow targetPath or the request.');
 });
+
+test('a timed-out call is recorded in the audit log with outcome timeout', { timeout: 2000 }, async (t) => {
+  const root = await createRepo({});
+  const broker = new Broker(root);
+  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise(() => {});
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+
+  const pending = broker.callTool('repo_map', { task: 'x' });
+  t.mock.timers.tick(10_000);
+  await pending;
+
+  const lines = (await readFile(join(root, AUDIT_DIRECTORY, AUDIT_FILE), 'utf8')).trim().split('\n');
+  const entry = JSON.parse(lines[lines.length - 1]) as { tool: string; outcome?: string };
+  assert.equal(entry.tool, 'repo_map');
+  assert.equal(entry.outcome, 'timeout');
+});

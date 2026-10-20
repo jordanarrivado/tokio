@@ -32,6 +32,8 @@ export interface ToolOutcome {
   estimate?: boolean;
   /** Routing decision for the audit log. Tier and confidence only. */
   route?: { tier: string; confidence: string };
+  /** Set when the call did not finish normally, so the audit log can count it. */
+  outcome?: 'timeout' | 'cancelled';
 }
 
 const MODES: readonly Mode[] = ['minimal', 'adaptive', 'strict'];
@@ -169,7 +171,8 @@ export class Broker {
         redactions: outcome.redactions ?? [],
         blocked: outcome.blocked ?? false,
         ...(baseline !== undefined ? { baselineTokens: baseline, savedTokens: baseline - returned } : {}),
-        ...(outcome.route ? { route: outcome.route } : {})
+        ...(outcome.route ? { route: outcome.route } : {}),
+        ...(outcome.outcome ? { outcome: outcome.outcome } : {})
       });
     } catch (error) {
       // The audit log must not break a tool call; report the failure on stderr, which MCP does not use.
@@ -184,7 +187,8 @@ export class Broker {
     const timeout = new Promise<ToolOutcome>((resolve) => {
       timer = setTimeout(() => resolve({
         text: `Timed out after ${TOOL_TIMEOUT_MS / 1000}s. Narrow targetPath or the request.`,
-        isError: true
+        isError: true,
+        outcome: 'timeout'
       }), TOOL_TIMEOUT_MS);
     });
     try {

@@ -20,6 +20,8 @@ export interface AuditEntry {
   savedTokens?: number;
   /** Routing decision from route_task. Tier and confidence only; no task text. */
   route?: { tier: string; confidence: string };
+  /** Set when the call did not finish normally. */
+  outcome?: 'timeout' | 'cancelled';
 }
 
 export const AUDIT_DIRECTORY = '.tokio';
