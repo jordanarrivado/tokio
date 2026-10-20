@@ -172,3 +172,20 @@ test('an unknown tool name returns an error listing the valid tools', async () =
     'Unknown tool: delete_everything. Valid tools: refine_task, repo_map, read_symbol, search_output, session_stats, route_task.'
   );
 });
+
+test('the tool handler is never invoked on invalid input', async () => {
+  const broker = new Broker(await createRepo({}));
+  let calls = 0;
+  // Replace the private handler on this instance with a spy.
+  (broker as unknown as Record<string, unknown>).repoMap = async () => {
+    calls += 1;
+    return { text: 'spy' };
+  };
+  await broker.callTool('repo_map', {});
+  await broker.callTool('repo_map', { task: 7 });
+  await broker.callTool('repo_map', { task: 'x', budgetTokens: 5 });
+  assert.equal(calls, 0);
+
+  await broker.callTool('repo_map', { task: 'x' });
+  assert.equal(calls, 1);
+});
