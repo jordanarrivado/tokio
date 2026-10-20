@@ -174,3 +174,17 @@ test('a cancelled queued call never runs and gets no response', { timeout: 2000 
   assert.deepEqual(runs, ['repo_map']);
   assert.deepEqual(sent.map((message) => message.id), [1]);
 });
+
+test('cancelling an unknown or finished request is ignored without a response or error', { timeout: 2000 }, async () => {
+  const { sent, handle } = await setup();
+  await handle(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }));
+  await handle(cancelLine(1));
+  await handle(cancelLine(99));
+  await handle(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled' }));
+  await handle(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }));
+
+  assert.deepEqual(sent, [
+    { jsonrpc: '2.0', id: 1, result: {} },
+    { jsonrpc: '2.0', id: 2, result: {} }
+  ]);
+});
