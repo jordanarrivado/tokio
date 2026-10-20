@@ -123,6 +123,17 @@ const TOOLS: readonly ToolDefinition[] = [
       },
       required: ['task']
     }
+  },
+  {
+    name: 'find_symbol',
+    description: 'Find a top-level definition by name. Returns path:line and signature; then use read_symbol.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' }
+      },
+      required: ['name']
+    }
   }
 ];
 
@@ -233,6 +244,8 @@ export class Broker {
         return this.sessionStats();
       case 'route_task':
         return this.routeTask(args, signal);
+      case 'find_symbol':
+        return this.findSymbol(args, signal);
       default:
         throw new Error(`Unknown tool: ${name}. Valid tools: ${TOOLS.map((tool) => tool.name).join(', ')}.`);
     }
@@ -362,6 +375,26 @@ export class Broker {
     };
   }
 
+  /** Top-level symbols ranked against a name: exact, then case-insensitive, then prefix. Ties sort by path. */
+  private async findSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
+    const name = requireString(args, 'name');
+    const scan = await scanRepository(this.root, signal);
+    const hits = scan.files
+      .flatMap((file) => extractSymbols(file.content, file.path).map((symbol) => ({ file, ...symbol })))
+      .map((hit) => ({ ...hit, rank: rankSymbolName(symbolName(hit.signature), name) }))
+      .filter((hit) => hit.rank >= 0)
+      .sort((left, right) => left.rank - right.rank || left.file.path.localeCompare(right.file.path) || left.line - right.line);
+
+    const text = hits.map((hit) => `${hit.file.path}:${hit.line}  ${hit.signature}`).join('\n');
+    // Baseline: reading every file with a hit in full.
+    const files = [...new Set(hits.map((hit) => hit.file))];
+    return {
+      text,
+      files: files.map((file) => file.path),
+      baselineTokens: files.reduce((total, file) => total + estimateTokens(file.content), 0)
+    };
+  }
+
   /**
    * Advisory routing only. The task is redacted before analysis, and the result carries no savings
    * estimate, because it changes nothing the agent reads.
@@ -412,6 +445,26 @@ export class Broker {
     }
     return id;
   }
+}
+
+/** The declared name in a signature such as `export class Broker` or `func (r *T) Run(`. */
+function symbolName(signature: string): string {
+  const match = /^(?:(?:export|default|declare|abstract|async|public|private|protected|static|pub(?:\([^)]*\))?|unsafe)\s+)*(?:(?:function\*?|class|interface|type|enum|const|let|var|def|fn|func|struct|trait|impl|namespace|module)\s+)?(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)/
+    .exec(signature);
+  return match ? match[1] : '';
+}
+
+/** 0 exact, 1 exact ignoring case, 2 prefix ignoring case, -1 no match. */
+function rankSymbolName(candidate: string, wanted: string): number {
+  if (candidate === wanted) {
+    return 0;
+  }
+  const lower = candidate.toLowerCase();
+  const target = wanted.toLowerCase();
+  if (lower === target) {
+    return 1;
+  }
+  return lower.startsWith(target) ? 2 : -1;
 }
 
 /** Line of the next top-level symbol after startLine, minus one, so a body stops before it. */

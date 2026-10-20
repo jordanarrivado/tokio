@@ -169,7 +169,7 @@ test('an unknown tool name returns an error listing the valid tools', async () =
   assert.equal(outcome.isError, true);
   assert.equal(
     outcome.text,
-    'Unknown tool: delete_everything. Valid tools: refine_task, repo_map, read_symbol, search_output, session_stats, route_task.'
+    'Unknown tool: delete_everything. Valid tools: refine_task, repo_map, read_symbol, search_output, session_stats, route_task, find_symbol.'
   );
 });
 
@@ -251,4 +251,30 @@ test('cancelled calls are recorded in the audit log with outcome cancelled', { t
     ['repo_map', 'cancelled'],
     ['route_task', 'cancelled']
   ]);
+});
+
+const BROKER_SOURCE = [
+  "import { scan } from './scan';",
+  '',
+  'export class Broker {',
+  '  run() {}',
+  '}',
+  ''
+].join('\n');
+
+test('find_symbol returns ranked path:line hits with signatures: exact, then case-insensitive, then prefix', async () => {
+  const broker = new Broker(await createRepo({
+    'src/broker/tools.ts': BROKER_SOURCE,
+    'src/legacy.ts': 'export function broker() {\n}\n',
+    'src/factory.ts': 'export function BrokerFactory() {\n}\n',
+    'src/other.ts': 'export function unrelated() {}\n'
+  }));
+  const outcome = await broker.callTool('find_symbol', { name: 'Broker' });
+  assert.equal(outcome.isError, undefined);
+  assert.deepEqual(outcome.text.split('\n').slice(0, 3), [
+    'src/broker/tools.ts:3  export class Broker',
+    'src/legacy.ts:1  export function broker()',
+    'src/factory.ts:1  export function BrokerFactory()'
+  ]);
+  assert.doesNotMatch(outcome.text, /unrelated/);
 });
