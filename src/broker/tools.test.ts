@@ -230,3 +230,25 @@ test('a call that finishes before 10s is unaffected by the timeout', { timeout: 
   assert.equal(outcome.isError, undefined);
   assert.match(outcome.text, /^map\n/);
 });
+
+test('cancelled calls are recorded in the audit log with outcome cancelled', { timeout: 2000 }, async () => {
+  const root = await createRepo({});
+  const broker = new Broker(root);
+  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise(() => {});
+
+  const running = new AbortController();
+  const pending = broker.callTool('repo_map', { task: 'x' }, running.signal);
+  running.abort();
+  await pending;
+
+  const queued = new AbortController();
+  queued.abort();
+  await broker.callTool('route_task', { task: 'x' }, queued.signal);
+
+  const lines = (await readFile(join(root, AUDIT_DIRECTORY, AUDIT_FILE), 'utf8')).trim().split('\n');
+  const entries = lines.map((line) => JSON.parse(line) as { tool: string; outcome?: string });
+  assert.deepEqual(entries.map((entry) => [entry.tool, entry.outcome]), [
+    ['repo_map', 'cancelled'],
+    ['route_task', 'cancelled']
+  ]);
+});
