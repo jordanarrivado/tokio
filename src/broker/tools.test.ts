@@ -316,3 +316,15 @@ test('find_symbol with no match returns an error with up to 3 close names', asyn
   assert.equal(many.isError, true);
   assert.equal(many.text, 'No symbol "roker". Close names: Broker, brokerage, BrokerError.');
 });
+
+test('find_symbol never returns hits from secret paths', async () => {
+  const broker = new Broker(await createRepo({
+    'src/app.ts': 'export function loadConfig() {\n}\n',
+    '.env': 'export function loadConfig() {\n}\n',
+    'src/secrets.ts': 'export function loadConfig() {\n}\n'
+  }));
+  const outcome = await broker.callTool('find_symbol', { name: 'loadConfig' });
+  assert.equal(outcome.isError, undefined);
+  assert.match(outcome.text, /^src\/app\.ts:1 /);
+  assert.doesNotMatch(outcome.text, /\.env|secrets\.ts/);
+});
