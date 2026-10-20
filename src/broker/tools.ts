@@ -142,13 +142,14 @@ export class Broker {
     return [...TOOLS];
   }
 
-  async callTool(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+  /** cancel aborts the call: it resolves at once with outcome 'cancelled'. */
+  async callTool(name: string, args: Record<string, unknown>, cancel?: AbortSignal): Promise<ToolOutcome> {
     let outcome: ToolOutcome;
     try {
       // Arguments are checked against the advertised schema first, so a handler never sees bad input.
       const definition = TOOLS.find((tool) => tool.name === name);
       const invalid = definition ? validateArgs(definition.inputSchema, args) : undefined;
-      outcome = invalid !== undefined ? { text: invalid, isError: true } : await this.dispatchWithTimeout(name, args);
+      outcome = invalid !== undefined ? { text: invalid, isError: true } : await this.dispatchWithTimeout(name, args, cancel);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       outcome = { text: message, isError: true, blocked: error instanceof PolicyError };
@@ -181,37 +182,53 @@ export class Broker {
     return outcome;
   }
 
-  /** Resolves with a timeout error once TOOL_TIMEOUT_MS passes, so a stuck handler cannot hold the caller. */
-  private async dispatchWithTimeout(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+  /**
+   * Runs the handler with a signal that aborts on timeout or when the caller's signal aborts.
+   * Either one resolves the call at once, so a stuck handler cannot hold the caller.
+   */
+  private async dispatchWithTimeout(name: string, args: Record<string, unknown>, cancel?: AbortSignal): Promise<ToolOutcome> {
+    const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<ToolOutcome>((resolve) => {
-      timer = setTimeout(() => resolve({
-        text: `Timed out after ${TOOL_TIMEOUT_MS / 1000}s. Narrow targetPath or the request.`,
-        isError: true,
-        outcome: 'timeout'
-      }), TOOL_TIMEOUT_MS);
+    let onCancel: (() => void) | undefined;
+    const stopped = new Promise<ToolOutcome>((resolve) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        resolve({
+          text: `Timed out after ${TOOL_TIMEOUT_MS / 1000}s. Narrow targetPath or the request.`,
+          isError: true,
+          outcome: 'timeout'
+        });
+      }, TOOL_TIMEOUT_MS);
+      onCancel = () => {
+        controller.abort();
+        resolve({ text: 'Cancelled.', isError: true, outcome: 'cancelled' });
+      };
+      cancel?.addEventListener('abort', onCancel, { once: true });
     });
     try {
-      return await Promise.race([this.dispatch(name, args), timeout]);
+      return await Promise.race([this.dispatch(name, args, controller.signal), stopped]);
     } finally {
       clearTimeout(timer);
+      if (onCancel) {
+        cancel?.removeEventListener('abort', onCancel);
+      }
     }
   }
 
-  private async dispatch(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+  private async dispatch(name: string, args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     switch (name) {
       case 'refine_task':
         return this.refineTask(args);
       case 'repo_map':
-        return this.repoMap(args);
+        return this.repoMap(args, signal);
       case 'read_symbol':
-        return this.readSymbol(args);
+        return this.readSymbol(args, signal);
       case 'search_output':
         return this.searchOutput(args);
       case 'session_stats':
         return this.sessionStats();
       case 'route_task':
-        return this.routeTask(args);
+        return this.routeTask(args, signal);
       default:
         throw new Error(`Unknown tool: ${name}. Valid tools: ${TOOLS.map((tool) => tool.name).join(', ')}.`);
     }
@@ -241,7 +258,7 @@ export class Broker {
     };
   }
 
-  private async repoMap(args: Record<string, unknown>): Promise<ToolOutcome> {
+  private async repoMap(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const task = requireString(args, 'task');
     const budgetTokens = optionalInteger(args, 'budgetTokens', DEFAULT_BUDGET_TOKENS, 200, MAX_BUDGET_TOKENS);
     const scan = await scanRepository(this.root);
@@ -265,7 +282,7 @@ export class Broker {
     return { text: `${map.text}\n${footer}`, files: map.files, baselineTokens };
   }
 
-  private async readSymbol(args: Record<string, unknown>): Promise<ToolOutcome> {
+  private async readSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const requested = requireString(args, 'path');
     const startLine = optionalInteger(args, 'startLine', 1, 1, Number.MAX_SAFE_INTEGER);
     const explicitEnd = optionalInteger(args, 'endLine', 0, 0, Number.MAX_SAFE_INTEGER);
@@ -345,7 +362,7 @@ export class Broker {
    * Advisory routing only. The task is redacted before analysis, and the result carries no savings
    * estimate, because it changes nothing the agent reads.
    */
-  private async routeTask(args: Record<string, unknown>): Promise<ToolOutcome> {
+  private async routeTask(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const task = redactSecrets(requireString(args, 'task')).text;
     const targetPath = optionalString(args, 'targetPath');
     const scan = await scanRepository(this.root);

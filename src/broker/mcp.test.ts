@@ -104,10 +104,42 @@ test('a timed-out call does not hold the queue: the next request runs right afte
   const queue = server.handleLine(JSON.stringify({
     jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'repo_map', arguments: { task: 'x' } }
   })).then(() => server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' })));
+  // Let the queued call start, so its 10s timer exists before the clock moves.
+  await new Promise((resolve) => setImmediate(resolve));
   t.mock.timers.tick(10_000);
   await queue;
 
   // No mocked time passed after the timeout, so the ping ran well within 100 ms of it.
   assert.equal((sent[0].result as { isError: boolean }).isError, true);
   assert.deepEqual(sent[1], { jsonrpc: '2.0', id: 2, result: {} });
+});
+
+function callLine(id: number, name = 'repo_map'): string {
+  return JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: { task: 'x' } } });
+}
+
+function cancelLine(requestId: unknown): string {
+  return JSON.stringify({ jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId } });
+}
+
+test('cancelling an in-flight call aborts its signal and sends no response for it', { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-cancel-'));
+  const broker = new Broker(root);
+  let received: AbortSignal | undefined;
+  (broker as unknown as Record<string, unknown>).repoMap = (_args: unknown, signal: AbortSignal) => {
+    received = signal;
+    return new Promise(() => {});
+  };
+  const sent: Record<string, unknown>[] = [];
+  const server = createMcpServer(broker, (message) => {
+    sent.push(message as Record<string, unknown>);
+  });
+
+  const call = server.handleLine(callLine(1));
+  await new Promise((resolve) => setImmediate(resolve));
+  await server.handleLine(cancelLine(1));
+  await call;
+
+  assert.equal(received?.aborted, true);
+  assert.equal(sent.length, 0);
 });
