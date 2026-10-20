@@ -117,6 +117,18 @@ export async function resolveRepoPath(root: string, requested: string): Promise<
   return { absolute: realFile, relative: relativePath };
 }
 
+/**
+ * Repo-relative prefix that a search is limited to: a directory or a file. Returns '' for the root.
+ * Blocks paths outside the repository, like resolveRepoPath, but does not require the path to exist.
+ */
+export function resolveRepoScope(root: string, requested: string): string {
+  const relativePath = relative(root, resolve(root, requested.replaceAll('\\', '/'))).replaceAll('\\', '/');
+  if (relativePath !== '' && isOutside(relativePath)) {
+    throw new PolicyError('Blocked: path is outside the repository.');
+  }
+  return relativePath;
+}
+
 function isOutside(relativePath: string): boolean {
   return relativePath === '' || relativePath === '..' || relativePath.startsWith('../') || isAbsolute(relativePath);
 }

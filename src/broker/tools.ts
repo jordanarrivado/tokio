@@ -7,7 +7,7 @@ import { countTermHits, extractSearchTerms } from '../context/discovery';
 import { buildRepoMap, extractSymbols } from '../context/repomap';
 import { estimateTokens } from '../core/tokens';
 import { appendAuditEntry } from './audit';
-import { PolicyError, redactSecrets, resolveRepoPath } from './policy';
+import { PolicyError, redactSecrets, resolveRepoPath, resolveRepoScope } from './policy';
 import { scanRepository } from './scan';
 import { formatFooter, formatStats, readAuditEntries, summarizeAudit } from './stats';
 import { detectValidationCommands } from '../context/project';
@@ -132,6 +132,7 @@ const TOOLS: readonly ToolDefinition[] = [
       type: 'object',
       properties: {
         name: { type: 'string' },
+        targetPath: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: MAX_SYMBOL_HITS }
       },
       required: ['name']
@@ -381,8 +382,11 @@ export class Broker {
   private async findSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const name = requireString(args, 'name');
     const limit = optionalInteger(args, 'limit', MAX_SYMBOL_HITS, 1, MAX_SYMBOL_HITS);
+    const targetPath = optionalString(args, 'targetPath');
+    const scope = targetPath === undefined ? '' : resolveRepoScope(this.root, targetPath);
     const scan = await scanRepository(this.root, signal);
     const symbols = scan.files
+      .filter((file) => scope === '' || file.path === scope || file.path.startsWith(`${scope}/`))
       .flatMap((file) => extractSymbols(file.content, file.path).map((symbol) => ({ file, ...symbol })));
     const hits = symbols
       .map((hit) => ({ ...hit, rank: rankSymbolName(symbolName(hit.signature), name) }))

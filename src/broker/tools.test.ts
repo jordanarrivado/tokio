@@ -328,3 +328,19 @@ test('find_symbol never returns hits from secret paths', async () => {
   assert.match(outcome.text, /^src\/app\.ts:1 /);
   assert.doesNotMatch(outcome.text, /\.env|secrets\.ts/);
 });
+
+test('find_symbol limits hits to targetPath and blocks a targetPath outside the repository', async () => {
+  const broker = new Broker(await createRepo({
+    'src/broker/tools.ts': BROKER_SOURCE,
+    'lib/broker.ts': 'export class Broker {\n}\n'
+  }));
+
+  const scoped = await broker.callTool('find_symbol', { name: 'Broker', targetPath: 'src/broker' });
+  assert.equal(scoped.isError, undefined);
+  assert.match(scoped.text, /^src\/broker\/tools\.ts:3 /);
+  assert.doesNotMatch(scoped.text, /lib\/broker\.ts/);
+
+  const outside = await broker.callTool('find_symbol', { name: 'Broker', targetPath: '../elsewhere' });
+  assert.equal(outside.isError, true);
+  assert.equal(outside.text, 'Blocked: path is outside the repository.');
+});
