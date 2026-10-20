@@ -13,6 +13,7 @@ const SERVER_VERSION: string = JSON.parse(readFileSync(join(__dirname, '..', '..
 const INSTRUCTIONS = [
   'Tokio reduces context. For a coding task: call refine_task once with the task text,',
   'then repo_map to find relevant files and line numbers, then read_symbol only for the bodies you need.',
+  'If you already know a name, find_symbol returns its path and line without a map.',
   'read_symbol returns only changed lines on repeat reads. search_output queries truncated results.',
   'Secret files are blocked.'
 ].join(' ');

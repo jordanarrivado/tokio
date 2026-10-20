@@ -213,3 +213,9 @@ test('cancelling one request leaves the others answered and in order', { timeout
   assert.deepEqual(sent.map((message) => message.id), [1, 3, 4]);
   assert.equal((sent[0].result as { isError?: boolean }).isError, undefined);
 });
+
+test('initialize instructions mention find_symbol', async () => {
+  const { sent, handle } = await setup();
+  await handle(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }));
+  assert.match((sent[0].result as { instructions: string }).instructions, /find_symbol/);
+});
