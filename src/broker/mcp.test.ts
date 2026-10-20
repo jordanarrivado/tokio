@@ -188,3 +188,28 @@ test('cancelling an unknown or finished request is ignored without a response or
     { jsonrpc: '2.0', id: 2, result: {} }
   ]);
 });
+
+test('cancelling one request leaves the others answered and in order', { timeout: 2000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'tokio-mcp-cancel-order-'));
+  const broker = new Broker(root);
+  let release: () => void = () => {};
+  (broker as unknown as Record<string, unknown>).repoMap = () => new Promise((resolve) => {
+    release = () => resolve({ text: 'map' });
+  });
+  const sent: Record<string, unknown>[] = [];
+  const server = createMcpServer(broker, (message) => {
+    sent.push(message as Record<string, unknown>);
+  });
+
+  void server.handleLine(callLine(1));
+  void server.handleLine(callLine(2));
+  void server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }));
+  const last = server.handleLine(JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/list' }));
+  void server.handleLine(cancelLine(2));
+  await new Promise((resolve) => setImmediate(resolve));
+  release();
+  await last;
+
+  assert.deepEqual(sent.map((message) => message.id), [1, 3, 4]);
+  assert.equal((sent[0].result as { isError?: boolean }).isError, undefined);
+});
