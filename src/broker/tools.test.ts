@@ -217,3 +217,16 @@ test('a timed-out call is recorded in the audit log with outcome timeout', { tim
   assert.equal(entry.tool, 'repo_map');
   assert.equal(entry.outcome, 'timeout');
 });
+
+test('a call that finishes before 10s is unaffected by the timeout', { timeout: 2000 }, async (t) => {
+  const broker = new Broker(await createRepo({}));
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  (broker as unknown as Record<string, unknown>).repoMap = () =>
+    new Promise((resolve) => setTimeout(() => resolve({ text: 'map', baselineTokens: 10 }), 9_999));
+
+  const pending = broker.callTool('repo_map', { task: 'x' });
+  t.mock.timers.tick(9_999);
+  const outcome = await pending;
+  assert.equal(outcome.isError, undefined);
+  assert.match(outcome.text, /^map\n/);
+});
