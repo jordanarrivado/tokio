@@ -278,3 +278,16 @@ test('find_symbol returns ranked path:line hits with signatures: exact, then cas
   ]);
   assert.doesNotMatch(outcome.text, /unrelated/);
 });
+
+test('find_symbol returns at most limit hits, default 10, then says how many more there are', async () => {
+  const source = Array.from({ length: 12 }, (_, index) => `export function handler${index}() {\n}\n`).join('');
+  const broker = new Broker(await createRepo({ 'src/handlers.ts': source }));
+
+  const byDefault = (await broker.callTool('find_symbol', { name: 'handler' })).text.split('\n');
+  assert.equal(byDefault.filter((line) => line.startsWith('src/handlers.ts:')).length, 10);
+  assert.equal(byDefault[10], '2 more; narrow with targetPath');
+
+  const limited = (await broker.callTool('find_symbol', { name: 'handler', limit: 3 })).text.split('\n');
+  assert.equal(limited.filter((line) => line.startsWith('src/handlers.ts:')).length, 3);
+  assert.equal(limited[3], '9 more; narrow with targetPath');
+});

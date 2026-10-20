@@ -50,6 +50,7 @@ const MAX_SEARCH_RESULT_TOKENS = 1500;
 const CHUNK_CHARS = 800;
 const MAX_STORED_OUTPUTS = 20;
 const TOOL_TIMEOUT_MS = 10_000;
+const MAX_SYMBOL_HITS = 10;
 
 const TOOLS: readonly ToolDefinition[] = [
   {
@@ -130,7 +131,8 @@ const TOOLS: readonly ToolDefinition[] = [
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string' }
+        name: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: MAX_SYMBOL_HITS }
       },
       required: ['name']
     }
@@ -378,6 +380,7 @@ export class Broker {
   /** Top-level symbols ranked against a name: exact, then case-insensitive, then prefix. Ties sort by path. */
   private async findSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const name = requireString(args, 'name');
+    const limit = optionalInteger(args, 'limit', MAX_SYMBOL_HITS, 1, MAX_SYMBOL_HITS);
     const scan = await scanRepository(this.root, signal);
     const hits = scan.files
       .flatMap((file) => extractSymbols(file.content, file.path).map((symbol) => ({ file, ...symbol })))
@@ -385,11 +388,15 @@ export class Broker {
       .filter((hit) => hit.rank >= 0)
       .sort((left, right) => left.rank - right.rank || left.file.path.localeCompare(right.file.path) || left.line - right.line);
 
-    const text = hits.map((hit) => `${hit.file.path}:${hit.line}  ${hit.signature}`).join('\n');
-    // Baseline: reading every file with a hit in full.
-    const files = [...new Set(hits.map((hit) => hit.file))];
+    const shown = hits.slice(0, limit);
+    const lines = shown.map((hit) => `${hit.file.path}:${hit.line}  ${hit.signature}`);
+    if (hits.length > shown.length) {
+      lines.push(`${hits.length - shown.length} more; narrow with targetPath`);
+    }
+    // Baseline: reading every file with a shown hit in full.
+    const files = [...new Set(shown.map((hit) => hit.file))];
     return {
-      text,
+      text: lines.join('\n'),
       files: files.map((file) => file.path),
       baselineTokens: files.reduce((total, file) => total + estimateTokens(file.content), 0)
     };
