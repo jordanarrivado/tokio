@@ -4,12 +4,14 @@ import { refinePrompt } from '../core/refine';
 import { classifyWorkCategory } from '../core/category';
 import type { Mode, PromptTarget, WorkCategory } from '../core/types';
 import { countTermHits, extractSearchTerms } from '../context/discovery';
-import { buildRepoMap, extractSymbols, type RepoFile } from '../context/repomap';
+import { buildRepoMap, extractSymbols, symbolName, type RepoFile } from '../context/repomap';
 import { estimateTokens } from '../core/tokens';
 import { appendAuditEntry } from './audit';
-import { PolicyError, redactSecrets, resolveRepoPath, resolveRepoScope } from './policy';
-import { scanRepository } from './scan';
-import { formatFooter, formatStats, readAuditEntries, summarizeAudit } from './stats';
+import { findMissingRepos, formatCatalog, loadCatalog } from './catalog';
+import { PolicyError, redactSecrets, resolveRepoPath } from './policy';
+import { displayPath, formatRepoRoute, narrowScan, pickReposForTask, repoOf, reposOf, scanNotes, scanSelection, scopeIn, selectRepo, selectRepos } from './repos';
+import { MAX_SCANNED_FILES } from './scan';
+import { formatFooter, formatStats, formatTokens, readAuditEntries, summarizeAudit } from './stats';
 import { detectValidationCommands } from '../context/project';
 import { findRelevantFiles, formatRoutePlan, planRoute } from '../context/routing';
 
@@ -34,13 +36,16 @@ export interface ToolOutcome {
   route?: { tier: string; confidence: string };
   /** Set when the call did not finish normally. Recorded as the audit entry's outcome. */
   ended?: 'timeout' | 'cancelled';
+  /** Catalog repositories the result drew on, for the audit log. Only with more than one repository. */
+  repos?: string[];
 }
 
 const MODES: readonly Mode[] = ['minimal', 'adaptive', 'strict'];
 const TARGETS: readonly PromptTarget[] = ['generic', 'claude', 'codex'];
 const CATEGORIES: readonly WorkCategory[] = [
-  'general', 'bug', 'feature', 'enhancement', 'refactor', 'performance',
-  'tests', 'documentation', 'investigation', 'other'
+  'general', 'bug', 'hotfix', 'feature', 'enhancement', 'ui', 'refactor', 'performance',
+  'tests', 'documentation', 'investigation', 'decision', 'planning', 'workflow', 'security', 'migration', 'dependency',
+  'review', 'other'
 ];
 
 const DEFAULT_BUDGET_TOKENS = 1500;
@@ -82,6 +87,7 @@ const TOOLS: readonly ToolDefinition[] = [
       type: 'object',
       properties: {
         task: { type: 'string' },
+        repo: { type: 'string' },
         targetPath: { type: 'string' },
         budgetTokens: { type: 'integer', minimum: 200, maximum: MAX_BUDGET_TOKENS }
       },
@@ -95,6 +101,7 @@ const TOOLS: readonly ToolDefinition[] = [
       type: 'object',
       properties: {
         path: { type: 'string' },
+        repo: { type: 'string' },
         startLine: { type: 'integer', minimum: 1 },
         endLine: { type: 'integer', minimum: 1 },
         full: { type: 'boolean' }
@@ -127,6 +134,7 @@ const TOOLS: readonly ToolDefinition[] = [
       type: 'object',
       properties: {
         task: { type: 'string' },
+        repo: { type: 'string' },
         targetPath: { type: 'string' }
       },
       required: ['task']
@@ -139,11 +147,17 @@ const TOOLS: readonly ToolDefinition[] = [
       type: 'object',
       properties: {
         name: { type: 'string' },
+        repo: { type: 'string' },
         targetPath: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: MAX_SYMBOL_HITS }
       },
       required: ['name']
     }
+  },
+  {
+    name: 'list_repositories',
+    description: 'List the local repositories in this workspace: name, path, purpose, write target or read-only, and merge order.',
+    inputSchema: { type: 'object', properties: {} }
   }
 ];
 
@@ -196,7 +210,8 @@ export class Broker {
         blocked: outcome.blocked ?? false,
         ...(baseline !== undefined ? { baselineTokens: baseline, savedTokens: baseline - returned } : {}),
         ...(outcome.route ? { route: outcome.route } : {}),
-        ...(outcome.ended ? { outcome: outcome.ended } : {})
+        ...(outcome.ended ? { outcome: outcome.ended } : {}),
+        ...(outcome.repos && outcome.repos.length > 0 ? { repos: outcome.repos } : {})
       });
     } catch (error) {
       // The audit log must not break a tool call; report the failure on stderr, which MCP does not use.
@@ -249,6 +264,8 @@ export class Broker {
         return this.routeTask(args, signal);
       case 'find_symbol':
         return this.findSymbol(args, signal);
+      case 'list_repositories':
+        return this.listRepositories(signal);
       default:
         // callTool rejects unknown names before dispatch; this only guards the switch.
         throw new Error(`Unknown tool: ${name}`);
@@ -258,13 +275,15 @@ export class Broker {
   private refineTask(args: Record<string, unknown>): ToolOutcome {
     const rawTask = requireString(args, 'task');
     const redacted = redactSecrets(rawTask);
-    const category = (args.category as WorkCategory | undefined)
-      ?? classifyWorkCategory(redacted.text).category;
+    const manualCategory = args.category as WorkCategory | undefined;
+    const classification = classifyWorkCategory(redacted.text);
+    const category = manualCategory ?? classification.category;
     const result = refinePrompt({
       rawPrompt: redacted.text,
       target: (args.target as PromptTarget | undefined) ?? 'claude',
       mode: args.mode as Mode | undefined,
       category,
+      additionalCategories: manualCategory ? undefined : classification.additional,
       targetPath: optionalString(args, 'targetPath')
     });
 
@@ -282,16 +301,26 @@ export class Broker {
   private async repoMap(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const task = requireString(args, 'task');
     const budgetTokens = optionalInteger(args, 'budgetTokens', DEFAULT_BUDGET_TOKENS);
-    const scan = await scanRepository(this.root, { signal });
+    const repo = optionalString(args, 'repo');
+    const targetPath = optionalString(args, 'targetPath');
+    const selection = await selectRepos(this.root, repo, signal);
+    const fullScan = await scanSelection(selection, { signal });
+    const { multi, catalog } = selection;
+    // Without a repo, the map covers only the repositories the task is about. repo: "*" keeps them all.
+    const picked = multi && repo === undefined ? pickReposForTask(selection, fullScan.files, task) : undefined;
+    const scan = picked ? narrowScan(fullScan, picked) : fullScan;
     const map = buildRepoMap(scan.files, {
       task,
-      targetPath: optionalString(args, 'targetPath'),
+      // With one repository the target is matched as given, as before catalogs existed.
+      targetPath: multi && targetPath !== undefined ? scopeIn(selection, repo, targetPath) : targetPath,
       budgetTokens,
-      coChange: scan.coChange
+      coChange: scan.coChange,
+      ...(multi ? { edges: scan.edges, preferPrefix: `${catalog.defaultRepo}/`, formatPath: (path: string) => displayPath(true, path) } : {})
     });
 
     const notes = [
-      scan.truncated ? `scan stopped at ${scan.files.length} files` : undefined,
+      picked ? `repos ${picked.join(', ')} picked for this task; pass repo: "*" for all` : undefined,
+      ...scanNotes(selection, scan, MAX_SCANNED_FILES),
       map.omittedFiles > 0 ? `${map.omittedFiles} ranked files omitted by budget` : undefined
     ].filter((note): note is string => note !== undefined);
     const footer = `[${map.tokens} tokens${notes.length > 0 ? `; ${notes.join('; ')}` : ''}]`;
@@ -300,7 +329,7 @@ export class Broker {
     const baselineTokens = scan.files
       .filter((file) => listed.has(file.path))
       .reduce((total, file) => total + estimateTokens(file.content), 0);
-    return { text: `${map.text}\n${footer}`, files: map.files, baselineTokens };
+    return { text: `${map.text}\n${footer}`, files: map.files, baselineTokens, repos: reposOf(multi, map.files) };
   }
 
   private async readSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
@@ -310,13 +339,17 @@ export class Broker {
     const explicitEnd = optionalInteger(args, 'endLine', 0);
     const full = args.full === true;
 
-    const { absolute, relative } = await resolveRepoPath(this.root, requested);
+    const { repo, multi } = await selectRepo(this.root, optionalString(args, 'repo'), signal);
+    const { absolute, relative } = await resolveRepoPath(repo.path, requested);
+    // With several repositories the repository is part of the key, so the same path in two of them never reads as unchanged.
+    const shown = multi ? `[${repo.name}] ${relative}` : relative;
+    const audited = multi ? `${repo.name}/${relative}` : relative;
     const content = await readFile(absolute, { encoding: 'utf8', signal });
     const lines = content.split(/\r?\n/);
     // Baseline: a full-file read of the same file.
     const baselineTokens = estimateTokens(content);
     if (startLine > lines.length) {
-      throw new Error(`startLine ${startLine} is past the end of ${relative} (${lines.length} lines).`);
+      throw new Error(`startLine ${startLine} is past the end of ${shown} (${lines.length} lines).`);
     }
 
     const naturalEnd = explicitEnd > 0
@@ -327,7 +360,7 @@ export class Broker {
     }
     const end = Math.min(naturalEnd, startLine + MAX_READ_LINES - 1);
     const body = lines.slice(startLine - 1, end);
-    const key = `${relative}:${startLine}-${end}`;
+    const key = `${shown}:${startLine}-${end}`;
 
     const previous = this.servedRanges.get(key);
     this.servedRanges.set(key, body);
@@ -335,7 +368,7 @@ export class Broker {
       const text = sameLines(previous, body)
         ? `Unchanged since the last read of ${key} in this session. Pass full: true to receive it again.`
         : `Changed since the last read of ${key}; showing changed lines only.\n${diffLines(previous, body, startLine)}`;
-      return { text, files: [relative], baselineTokens };
+      return { text, files: [audited], baselineTokens, repos: reposOf(multi, [audited]) };
     }
 
     let text = body.map((line, index) => `${startLine + index}| ${line}`).join('\n');
@@ -343,7 +376,7 @@ export class Broker {
       const outputId = this.storeOutput(lines.slice(startLine - 1, naturalEnd).join('\n'));
       text += `\n[Truncated at ${MAX_READ_LINES} lines. Lines ${end + 1}-${naturalEnd} stored as output ${outputId}; use search_output.]`;
     }
-    return { text, files: [relative], baselineTokens };
+    return { text, files: [audited], baselineTokens, repos: reposOf(multi, [audited]) };
   }
 
   private searchOutput(args: Record<string, unknown>): ToolOutcome {
@@ -380,13 +413,20 @@ export class Broker {
     };
   }
 
-  /** Top-level symbols ranked against a name: exact, then case-insensitive, then prefix. Ties sort by path. */
+  /**
+   * Top-level symbols ranked against a name: exact, then case-insensitive, then prefix. Ties put the
+   * default repository first, then sort by path.
+   */
   private async findSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const name = requireString(args, 'name');
     const limit = optionalInteger(args, 'limit', MAX_SYMBOL_HITS);
+    const repo = optionalString(args, 'repo');
     const targetPath = optionalString(args, 'targetPath');
-    const scope = targetPath === undefined ? '' : resolveRepoScope(this.root, targetPath);
-    const scan = await scanRepository(this.root, { signal, history: false });
+    const selection = await selectRepos(this.root, repo, signal);
+    const { multi, catalog } = selection;
+    const scope = targetPath === undefined ? '' : scopeIn(selection, repo, targetPath);
+    const scan = await scanSelection(selection, { signal, history: false, edges: false });
+    const preferred = (path: string): number => (multi && repoOf(path) === catalog.defaultRepo ? 1 : 0);
     const inScope = scan.files
       .filter((file) => scope === '' || file.path === scope || file.path.startsWith(`${scope}/`));
     const symbolsIn = (files: readonly RepoFile[]) => files.flatMap((file) => extractSymbols(file.content, file.path)
@@ -397,22 +437,26 @@ export class Broker {
     const hits = symbolsIn(inScope.filter((file) => file.content.toLowerCase().includes(query)))
       .map((symbol) => ({ ...symbol, rank: rankSymbolName(symbol.name, name) }))
       .filter((hit) => hit.rank >= 0)
-      .sort((left, right) => left.rank - right.rank || left.file.path.localeCompare(right.file.path) || left.line - right.line);
+      .sort((left, right) => left.rank - right.rank
+        || preferred(right.file.path) - preferred(left.file.path)
+        || left.file.path.localeCompare(right.file.path)
+        || left.line - right.line);
     if (hits.length === 0) {
       const close = closeNames([...new Set(symbolsIn(inScope).map((symbol) => symbol.name))], name);
       throw new Error(`No symbol "${name}".${close.length > 0 ? ` Close names: ${close.join(', ')}.` : ''}`);
     }
 
     const shown = hits.slice(0, limit);
-    const lines = shown.map((hit) => `${hit.file.path}:${hit.line}  ${hit.signature}`);
+    const lines = shown.map((hit) => `${displayPath(multi, hit.file.path)}:${hit.line}  ${hit.signature}`);
     if (hits.length > shown.length) {
-      lines.push(`${hits.length - shown.length} more; narrow with targetPath`);
+      lines.push(`${hits.length - shown.length} more; narrow with ${multi ? 'repo or targetPath' : 'targetPath'}`);
     }
     // Baseline: reading every file with a shown hit in full.
     const files = [...new Set(shown.map((hit) => hit.file))];
     return {
       text: lines.join('\n'),
       files: files.map((file) => file.path),
+      repos: reposOf(multi, files.map((file) => file.path)),
       baselineTokens: files.reduce((total, file) => total + estimateTokens(file.content), 0)
     };
   }
@@ -423,9 +467,13 @@ export class Broker {
    */
   private async routeTask(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
     const task = redactSecrets(requireString(args, 'task')).text;
+    const repo = optionalString(args, 'repo');
     const targetPath = optionalString(args, 'targetPath');
-    const scan = await scanRepository(this.root, { signal, history: false });
-    const relevantFiles = findRelevantFiles(scan.files, task, targetPath);
+    const selection = await selectRepos(this.root, repo, signal);
+    const { multi, catalog } = selection;
+    const scan = await scanSelection(selection, { signal, history: false, edges: false });
+    const target = multi && targetPath !== undefined ? scopeIn(selection, repo, targetPath) : targetPath;
+    const relevantFiles = findRelevantFiles(scan.files, task, target);
     const classification = classifyWorkCategory(task);
     const plan = planRoute({
       task,
@@ -434,15 +482,20 @@ export class Broker {
       categoryConfidence: classification.confidence
     });
 
-    const rootNames = new Set(await readdir(this.root));
-    const packageJson = rootNames.has('package.json')
-      ? await readFile(join(this.root, 'package.json'), 'utf8')
+    // Validation runs in the write target. A missing write target has no commands to detect.
+    const writeRepo = catalog.repos.find((candidate) => candidate.name === catalog.defaultRepo);
+    const writeRoot = writeRepo && !selection.skipped.includes(writeRepo.name) ? writeRepo.path : undefined;
+    const rootNames = new Set(writeRoot ? await readdir(writeRoot) : []);
+    const packageJson = writeRoot && rootNames.has('package.json')
+      ? await readFile(join(writeRoot, 'package.json'), 'utf8')
       : undefined;
     const validation = detectValidationCommands({ packageJson, rootPaths: rootNames });
 
+    const planText = formatRoutePlan(plan, validation);
     return {
-      text: formatRoutePlan(plan, validation),
+      text: multi ? `${planText}\n${formatRepoRoute(catalog, relevantFiles)}` : planText,
       files: relevantFiles.slice(0, 20),
+      repos: reposOf(multi, relevantFiles),
       route: { tier: plan.tier, confidence: plan.confidence },
       estimate: false
     };
@@ -450,9 +503,26 @@ export class Broker {
 
   /** Summarizes audit entries written since this server started. Its own result carries no estimate. */
   private async sessionStats(): Promise<ToolOutcome> {
-    const entries = (await readAuditEntries(this.root))
-      .filter((entry) => new Date(entry.timestamp) >= this.startedAt);
-    return { text: formatStats(summarizeAudit(entries), 'this session'), estimate: false };
+    const all = await readAuditEntries(this.root);
+    const session = all.filter((entry) => new Date(entry.timestamp) >= this.startedAt);
+    // The audit log survives restarts, so the all-time total is shown beside the session total.
+    const lifetime = summarizeAudit(all);
+    const sign = lifetime.savedTokens < 0 ? '-' : '+';
+    const text = [
+      formatStats(summarizeAudit(session), 'this session'),
+      `All recorded calls for this project: ${lifetime.calls}, estimated net saved ${sign}${formatTokens(Math.abs(lifetime.savedTokens))}. Run tokio stats for detail.`
+    ].join('\n');
+    return { text, estimate: false };
+  }
+
+  /**
+   * Catalog summaries only, the first step of a task across repositories. The result carries no
+   * savings estimate, because it replaces no file read.
+   */
+  private async listRepositories(signal: AbortSignal): Promise<ToolOutcome> {
+    const catalog = await loadCatalog(this.root, signal);
+    const missing = await findMissingRepos(catalog);
+    return { text: formatCatalog(catalog, missing), estimate: false };
   }
 
   private storeOutput(text: string): string {
@@ -467,13 +537,6 @@ export class Broker {
     }
     return id;
   }
-}
-
-/** The declared name in a signature such as `export class Broker` or `func (r *T) Run(`. */
-function symbolName(signature: string): string {
-  const match = /^(?:(?:export|default|declare|abstract|async|public|private|protected|static|pub(?:\([^)]*\))?|unsafe)\s+)*(?:(?:function\*?|class|interface|type|enum|const|let|var|def|fn|func|struct|trait|impl|namespace|module)\s+)?(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)/
-    .exec(signature);
-  return match ? match[1] : '';
 }
 
 /** 0 exact, 1 exact ignoring case, 2 prefix ignoring case, -1 no match. */

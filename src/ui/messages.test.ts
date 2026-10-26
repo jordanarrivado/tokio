@@ -71,6 +71,35 @@ test('rechecks Auto category when refinement is submitted', async () => {
   assert.match(response.refinedPrompt, /Type: Bug Fix/);
 });
 
+test('returns every detected category with an Auto refine and adds their lines', async () => {
+  const auto = await handleWebviewRequest({
+    type: 'refine',
+    requestId: 19,
+    rawPrompt: 'The checkout is broken after payment. Add tests and check it for XSS.',
+    targetPath: '',
+    mode: 'adaptive'
+  }, unusedClipboard());
+  const manual = await handleWebviewRequest({
+    type: 'refine',
+    requestId: 20,
+    rawPrompt: 'The checkout is broken after payment. Add tests and check it for XSS.',
+    targetPath: '',
+    mode: 'adaptive',
+    category: 'bug'
+  }, unusedClipboard());
+
+  assert.equal(auto?.type, 'refineResult');
+  assert.equal(manual?.type, 'refineResult');
+  if (auto?.type !== 'refineResult' || manual?.type !== 'refineResult') {
+    return;
+  }
+  assert.equal(auto.classification?.category, 'security');
+  assert.deepEqual(auto.classification?.additional, ['bug', 'tests']);
+  assert.match(auto.refinedPrompt, /Type: Security — .+\n\nAlso: Bug Fix — .+\nAlso: Tests — /);
+  assert.equal(manual.classification, undefined);
+  assert.doesNotMatch(manual.refinedPrompt, /Also:/);
+});
+
 test('ignores malformed and unsupported webview messages', async () => {
   assert.equal(await handleWebviewRequest(null, unusedClipboard()), undefined);
   assert.equal(await handleWebviewRequest({ type: 'unknown' }, unusedClipboard()), undefined);

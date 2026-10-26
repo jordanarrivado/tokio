@@ -10,7 +10,14 @@ const EXCLUDED_DIRECTORIES = new Set([
   'target', '__pycache__', '.venv', 'venv'
 ]);
 export const MAX_SCANNED_FILES = 500;
+/** The most a catalog repository may raise its own cap to, with `maxFiles`. */
+export const MAX_SCANNED_FILES_LIMIT = 5000;
 export const MAX_FILE_BYTES = 32_000;
+/**
+ * Generated folders, matched from the repository root only, so a source folder that happens to share
+ * a name deeper down is still scanned. Laravel writes compiled views, logs, and caches here.
+ */
+const EXCLUDED_ROOT_PATHS = new Set(['storage/framework', 'storage/logs', 'bootstrap/cache']);
 
 export interface ScanResult {
   files: RepoFile[];
@@ -26,7 +33,7 @@ export interface ScanResult {
  */
 export async function scanRepository(
   root: string,
-  { signal, history = true }: { signal?: AbortSignal; history?: boolean } = {}
+  { signal, history = true, maxFiles = MAX_SCANNED_FILES }: { signal?: AbortSignal; history?: boolean; maxFiles?: number } = {}
 ): Promise<ScanResult> {
   const files: RepoFile[] = [];
   let truncated = false;
@@ -38,14 +45,15 @@ export async function scanRepository(
 
     for (const entry of entries) {
       signal?.throwIfAborted();
-      if (files.length >= MAX_SCANNED_FILES) {
+      if (files.length >= maxFiles) {
         truncated = true;
         return;
       }
 
       const fullPath = join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (!EXCLUDED_DIRECTORIES.has(entry.name)) {
+        const fromRoot = relative(root, fullPath).replaceAll('\\', '/');
+        if (!EXCLUDED_DIRECTORIES.has(entry.name) && !EXCLUDED_ROOT_PATHS.has(fromRoot)) {
           await walk(fullPath);
         }
         continue;

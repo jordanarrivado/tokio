@@ -73,7 +73,9 @@ test('lists tools and reports tool failures as results, not protocol errors', as
   const { sent, handle } = await setup();
   await handle(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }));
   const tools = (sent[0].result as { tools: { name: string }[] }).tools.map((tool) => tool.name);
-  assert.deepEqual(tools, ['refine_task', 'repo_map', 'read_symbol', 'search_output', 'session_stats', 'route_task', 'find_symbol']);
+  assert.deepEqual(tools, [
+    'refine_task', 'repo_map', 'read_symbol', 'search_output', 'session_stats', 'route_task', 'find_symbol', 'list_repositories'
+  ]);
 
   await handle(JSON.stringify({
     jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_symbol', arguments: { path: '.env' } }
@@ -217,8 +219,10 @@ test('cancelling one request leaves the others answered and in order', { timeout
   assert.equal((sent[0].result as { isError?: boolean }).isError, undefined);
 });
 
-test('initialize instructions mention find_symbol', async () => {
+test('initialize instructions mention find_symbol and list_repositories', async () => {
   const { sent, handle } = await setup();
   await handle(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }));
-  assert.match((sent[0].result as { instructions: string }).instructions, /find_symbol/);
+  const { instructions } = sent[0].result as { instructions: string };
+  assert.match(instructions, /find_symbol/);
+  assert.match(instructions, /list_repositories/);
 });

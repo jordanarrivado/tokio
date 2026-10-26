@@ -3,14 +3,53 @@ import { randomBytes } from 'node:crypto';
 import * as vscode from 'vscode';
 
 import { WorkspaceContextService } from '../context/workspace';
+import { RepositoryMapPanel } from './map';
 import { handleWebviewRequest } from './messages';
+import { createRepoCatalogService } from './repos';
 
 export const VIEW_ID = 'tokio.view';
+export const OPEN_MAP_COMMAND = 'tokio.openRepositoryMap';
+
+/** Repository actions that change the catalog or write scope, so an open map or sidebar should refresh. */
+const REPO_MUTATIONS = new Set(['grant', 'revoke', 'clearGrants', 'setDefault', 'add', 'remove']);
 
 export class TokioViewProvider implements vscode.WebviewViewProvider {
   private readonly contextService = new WorkspaceContextService();
+  private webview: vscode.Webview | undefined;
+  /** Shared with the repository map, so both edit the same catalog through the same checks. */
+  public readonly repoCatalog = createRepoCatalogService({
+    root: () => getTrustedWorkspaceRoot(),
+    pickFolder: async () => {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: false,
+        canSelectFolders: true,
+        canSelectMany: false,
+        openLabel: 'Add Repository'
+      });
+      return picked?.[0]?.fsPath;
+    },
+    pickFile: async (directory) => {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectFiles: true,
+        canSelectFolders: false,
+        canSelectMany: false,
+        defaultUri: vscode.Uri.file(directory),
+        openLabel: 'Use File'
+      });
+      return picked?.[0]?.fsPath;
+    },
+    confirm: async (message) => (await vscode.window.showWarningMessage(message, { modal: true }, 'Remove')) === 'Remove',
+    openMap: () => {
+      void vscode.commands.executeCommand(OPEN_MAP_COMMAND);
+    }
+  });
 
   public constructor(private readonly extensionUri: vscode.Uri) {}
+
+  /** Asks the sidebar to reload the catalog after the repository map changed it. */
+  public notifyReposChanged(): void {
+    void this.webview?.postMessage({ type: 'reposChanged' });
+  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     const { webview } = webviewView;
@@ -22,10 +61,14 @@ export class TokioViewProvider implements vscode.WebviewViewProvider {
     };
 
     webview.html = getWebviewHtml(avatarUri, webview.cspSource);
+    this.webview = webview;
     const messageSubscription = webview.onDidReceiveMessage((message: unknown) => {
       void this.handleMessage(webview, message);
     });
-    webviewView.onDidDispose(() => messageSubscription.dispose());
+    webviewView.onDidDispose(() => {
+      messageSubscription.dispose();
+      this.webview = undefined;
+    });
   }
 
   private async handleMessage(webview: vscode.Webview, message: unknown): Promise<void> {
@@ -39,12 +82,28 @@ export class TokioViewProvider implements vscode.WebviewViewProvider {
         const document = await vscode.workspace.openTextDocument({ content: text, language: 'plaintext' });
         await vscode.window.showTextDocument(document, { preview: true });
       }
-    });
+    }, this.repoCatalog);
 
     if (response) {
       await webview.postMessage(response);
     }
+    const action = (message as { action?: unknown } | undefined)?.action;
+    if (response?.type === 'reposResult' && response.success && typeof action === 'string' && REPO_MUTATIONS.has(action)) {
+      RepositoryMapPanel.notifyChanged();
+    }
   }
+}
+
+/** The first workspace folder, where tokio.repos.json lives. Changing write scope needs a trusted, local folder. */
+function getTrustedWorkspaceRoot(): string {
+  if (!vscode.workspace.isTrusted) {
+    throw new Error('Trust this workspace before changing repository settings.');
+  }
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder || folder.uri.scheme !== 'file') {
+    throw new Error('Open a local workspace folder to manage repositories.');
+  }
+  return folder.uri.fsPath;
 }
 
 function getActiveWorkspaceFilePath(): string | undefined {
@@ -95,345 +154,558 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tokio</title>
   <style nonce="${nonce}">
+    /* One token set, mapped to the VS Code theme, so the panel matches light, dark, and high-contrast themes. */
     :root {
-      color-scheme: dark;
-      --ts-bg: #2b2623;
-      --ts-surface: #342e2a;
-      --ts-surface-raised: #3d3631;
-      --ts-input: #272220;
-      --ts-border: #4a4039;
-      --ts-border-strong: #5e5148;
-      --ts-accent: #e0a46a;
-      --ts-accent-hover: #ebb583;
-      --ts-accent-soft: rgba(224, 164, 106, 0.1);
-      --ts-accent-border: rgba(224, 164, 106, 0.35);
-      --ts-text: #f3ebe2;
-      --ts-muted: #b5a698;
-      --ts-placeholder: #8c7e72;
-      --ts-warn: #e6c06f;
-      --ts-danger: #ee8a7c;
-      --ts-shadow: rgba(0, 0, 0, 0.25);
-      --ts-shadow-accent: rgba(224, 164, 106, 0.14);
-    }
-
-    body.vscode-light,
-    body.vscode-high-contrast-light {
-      color-scheme: light;
-      --ts-bg: #faf4ec;
-      --ts-surface: #fffaf3;
-      --ts-surface-raised: #f4eadf;
-      --ts-input: #fffdf9;
-      --ts-border: #e4d6c6;
-      --ts-border-strong: #d3bfa9;
-      --ts-accent: #b8683a;
-      --ts-accent-hover: #a65a2f;
-      --ts-accent-soft: rgba(184, 104, 58, 0.09);
-      --ts-accent-border: rgba(184, 104, 58, 0.35);
-      --ts-text: #3d3128;
-      --ts-muted: #7d6d5f;
-      --ts-placeholder: #a8998a;
-      --ts-warn: #a97a1c;
-      --ts-danger: #b94a3b;
-      --ts-shadow: rgba(90, 60, 30, 0.12);
-      --ts-shadow-accent: rgba(184, 104, 58, 0.16);
+      --bg: var(--vscode-sideBar-background, #1f1f1f);
+      --surface: var(--vscode-editorWidget-background, #252526);
+      --field: var(--vscode-input-background, #2a2a2a);
+      --field-fg: var(--vscode-input-foreground, var(--text));
+      --border: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.3)));
+      --border-strong: var(--vscode-input-border, var(--border));
+      --text: var(--vscode-foreground, #cccccc);
+      --muted: var(--vscode-descriptionForeground, #9d9d9d);
+      --placeholder: var(--vscode-input-placeholderForeground, #8a8a8a);
+      --accent: var(--vscode-button-background, #0e639c);
+      --accent-fg: var(--vscode-button-foreground, #ffffff);
+      --accent-hover: var(--vscode-button-hoverBackground, #1177bb);
+      --accent-text: var(--vscode-textLink-foreground, #3794ff);
+      --accent-soft: color-mix(in srgb, var(--accent-text) 12%, transparent);
+      --secondary: var(--vscode-button-secondaryBackground, #3a3d41);
+      --secondary-fg: var(--vscode-button-secondaryForeground, var(--text));
+      --secondary-hover: var(--vscode-button-secondaryHoverBackground, #45494e);
+      --hover: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.14));
+      --focus: var(--vscode-focusBorder, #007fd4);
+      --ok: var(--vscode-testing-iconPassed, #73c991);
+      --warn: var(--vscode-editorWarning-foreground, #cca700);
+      --danger: var(--vscode-errorForeground, #f48771);
+      --mono: var(--vscode-editor-font-family, monospace);
+      --radius: 8px;
+      --radius-sm: 6px;
+      --gap: 12px;
     }
 
     * { box-sizing: border-box; }
 
     body {
       margin: 0;
-      padding: 12px;
-      color: var(--ts-text);
-      background: var(--ts-bg);
+      padding: 12px 12px 0;
+      color: var(--text);
+      background: var(--bg);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
+      line-height: 1.45;
     }
 
-    ::selection { color: var(--ts-bg); background: var(--ts-accent); }
-    * { scrollbar-color: var(--ts-border-strong) var(--ts-bg); scrollbar-width: thin; }
+    ::selection { color: var(--accent-fg); background: var(--accent); }
+    * { scrollbar-width: thin; }
 
-    .app { width: 100%; max-width: 560px; margin: 0 auto; }
+    .app { width: 100%; max-width: 600px; margin: 0 auto; }
 
-    .app-header {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 12px;
-    }
-
+    /* Header */
+    .app-header { display: flex; align-items: center; gap: 10px; margin-bottom: var(--gap); }
     .brand-mark {
-      width: 40px;
-      height: 40px;
-      flex: 0 0 40px;
+      width: 32px;
+      height: 32px;
+      flex: 0 0 32px;
       overflow: hidden;
-      border: 1px solid var(--ts-border);
-      border-radius: 10px;
-      background: var(--ts-input);
-      box-shadow: 0 3px 12px var(--ts-shadow);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      background: var(--field);
     }
-
+    .brand-avatar { display: block; width: 100%; height: 100%; object-fit: cover; }
     .brand-copy { min-width: 0; flex: 1; }
-    .brand-avatar {
-      display: block;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-    .brand-copy h1 { margin: 0; font-size: 1.12rem; line-height: 1.2; }
-    .brand-copy p { margin: 2px 0 0; }
+    .brand-copy h1 { margin: 0; font-size: 1.05rem; font-weight: 650; line-height: 1.2; }
+    .brand-copy p { margin: 1px 0 0; }
 
-    .local-badge {
-      flex: 0 0 auto;
-      padding: 3px 7px;
-      border: 1px solid var(--ts-accent);
-      border-radius: 999px;
-      color: var(--ts-accent);
-      background: transparent;
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }
+    /* minmax(0, 1fr) lets columns shrink below their content, so a long line never widens the panel. */
+    form { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
 
-    form { display: grid; gap: 10px; }
-
+    /* Cards */
     .card {
       display: grid;
-      gap: 11px;
-      padding: 12px;
-      border: 1px solid var(--ts-border);
-      border-radius: 9px;
-      background: var(--ts-surface);
-      box-shadow: 0 1px 2px var(--ts-shadow);
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--gap);
+      min-width: 0;
+      padding: 14px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface);
     }
 
-    .section-title {
+    .section-title, .card-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .section-title h2, .card-head h2 { flex: 1; min-width: 0; margin: 0; font-size: 0.95rem; font-weight: 650; }
+    .step {
+      display: inline-grid;
+      place-items: center;
+      width: 20px;
+      height: 20px;
+      flex: 0 0 20px;
+      border-radius: 50%;
+      color: var(--accent-fg);
+      background: var(--accent);
+      font-size: 0.75em;
+      font-weight: 700;
+    }
+
+    /* Collapsible card: the summary is the card header. */
+    .card.collapsible { padding: 0; gap: 0; }
+    .card.collapsible > details > summary {
       display: flex;
       align-items: center;
-      justify-content: space-between;
       gap: 8px;
+      padding: 11px 14px;
+      cursor: pointer;
+      list-style: none;
+      border-radius: var(--radius);
     }
+    .card.collapsible > details > summary::-webkit-details-marker { display: none; }
+    .card.collapsible > details > summary:hover { background: var(--hover); }
+    .card.collapsible > details[open] > summary { border-bottom: 1px solid var(--border); border-radius: var(--radius) var(--radius) 0 0; }
+    .card.collapsible .card-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); padding: 14px; }
+    .chevron { color: var(--muted); transition: transform 120ms ease; }
+    details[open] > summary .chevron { transform: rotate(90deg); }
 
-    .section-title h2 { margin: 0; color: var(--ts-text); font-size: 0.98rem; }
-    .step {
-      padding: 3px 7px;
-      border-radius: 999px;
-      color: var(--ts-bg);
-      background: var(--ts-accent);
-      font-size: 9px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-    }
+    /* Fields */
     .field { display: grid; gap: 6px; min-width: 0; }
-    label, .field-label { font-weight: 600; }
+    .field-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--gap); }
+    /* Wide fields sit side by side only when each gets room for a file path. */
+    .field-grid.wide { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    label, .field-label { font-weight: 600; font-size: 0.92em; }
+    .field-meta { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 
-    textarea,
-    input,
-    select {
+    textarea, input, select {
       width: 100%;
       min-width: 0;
-      border: 1px solid var(--ts-border-strong);
-      border-radius: 6px;
-      padding: 8px 9px;
-      color: var(--ts-text);
-      background: var(--ts-input);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      padding: 7px 9px;
+      color: var(--field-fg);
+      background: var(--field);
       font: inherit;
-      transition: border-color 120ms ease, box-shadow 120ms ease;
     }
-
-    textarea { min-height: 132px; resize: vertical; line-height: 1.45; }
-    #acceptance { min-height: 56px; }
-    #refined-prompt { min-height: 220px; font-family: var(--vscode-editor-font-family); }
-    textarea::placeholder, input::placeholder { color: var(--ts-placeholder); opacity: 1; }
-    select { accent-color: var(--ts-accent); }
-
-    textarea:focus,
-    input:focus,
-    select:focus {
-      outline: none;
-      border-color: var(--ts-accent);
-      box-shadow: 0 0 0 1px var(--ts-accent);
-    }
-
-    button:focus-visible,
-    summary:focus-visible {
-      outline: 1px solid var(--ts-accent);
-      outline-offset: 2px;
-    }
-
-    button {
-      min-height: 32px;
-      border: 1px solid transparent;
-      border-radius: 6px;
-      padding: 6px 11px;
-      color: var(--ts-bg);
-      background: var(--ts-accent);
-      font: inherit;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 120ms ease, opacity 120ms ease, transform 80ms ease;
-    }
-
-    button:hover:not(:disabled) { background: var(--ts-accent-hover); }
-    button:active:not(:disabled) { transform: translateY(1px); }
-    button:disabled { cursor: not-allowed; opacity: 0.48; }
-
-    button.secondary {
-      border-color: var(--ts-border-strong);
-      color: var(--ts-text);
-      background: var(--ts-surface-raised);
-    }
-
-    button.secondary:hover:not(:disabled) { border-color: var(--ts-accent); background: var(--ts-accent-soft); }
-
-    button.ghost {
-      border-color: var(--ts-border-strong);
-      color: var(--ts-text);
-      background: transparent;
-    }
-
-    button.ghost:hover:not(:disabled) { border-color: var(--ts-accent); color: var(--ts-accent); background: var(--ts-accent-soft); }
-    button.compact { min-height: 28px; padding: 4px 8px; font-size: 0.9em; }
-    #selection-button { border-color: var(--ts-accent); color: var(--ts-accent); }
-    .cta { width: 100%; min-height: 38px; box-shadow: 0 4px 14px var(--ts-shadow-accent); }
+    textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
+    #acceptance { min-height: 52px; }
+    #refined-prompt { min-height: 220px; font-family: var(--mono); font-size: var(--vscode-editor-font-size); }
+    textarea::placeholder, input::placeholder { color: var(--placeholder); opacity: 1; }
+    select { cursor: pointer; }
+    textarea:focus, input:focus, select:focus { outline: 1px solid var(--focus); outline-offset: -1px; border-color: var(--focus); }
+    button:focus-visible, summary:focus-visible { outline: 1px solid var(--focus); outline-offset: 2px; }
+    input[type="checkbox"] { width: auto; accent-color: var(--accent); }
 
     .input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
-    .toolbar, .output-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-    .output-actions button { flex: 1 1 105px; }
 
-    .field-meta {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      align-items: baseline;
+    /* Buttons: primary, secondary, ghost, and a compact size for any of them. */
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      min-height: 30px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-sm);
+      padding: 5px 12px;
+      color: var(--accent-fg);
+      background: var(--accent);
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
     }
+    button:hover:not(:disabled) { background: var(--accent-hover); }
+    button:disabled { cursor: not-allowed; opacity: 0.45; }
+    button.secondary { color: var(--secondary-fg); background: var(--secondary); }
+    button.secondary:hover:not(:disabled) { background: var(--secondary-hover); }
+    button.ghost { border-color: var(--border-strong); color: var(--text); background: transparent; font-weight: 500; }
+    button.ghost:hover:not(:disabled) { background: var(--hover); }
+    button.compact { min-height: 26px; padding: 3px 9px; font-size: 0.88em; }
+    .toolbar, .output-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .output-actions button { flex: 1 1 auto; white-space: nowrap; }
 
-    .stats { white-space: nowrap; font-variant-numeric: tabular-nums; }
-    .shortcut { float: right; opacity: 0.75; font-weight: 400; }
+    .cta { width: 100%; min-height: 36px; font-size: 1em; }
+    .cta.stale { outline: 2px solid var(--warn); outline-offset: 2px; }
+    .shortcut { margin-left: auto; padding: 1px 6px; border-radius: 4px; background: rgba(0, 0, 0, 0.18); font-size: 0.8em; font-weight: 500; opacity: 0.85; }
+    .cta-label { flex: 1; text-align: center; }
 
+    /* Chips: one shape for every badge, with a tone per meaning. */
+    .chip,
+    .local-badge,
+    .detection-badge,
+    .confidence-badge,
+    .also-badge,
+    .repo-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 1px 8px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      color: var(--muted);
+      background: transparent;
+      font-size: 0.8em;
+      font-weight: 500;
+      line-height: 1.6;
+      white-space: nowrap;
+    }
+    .local-badge { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); font-weight: 600; }
+    .detection-badge, .repo-badge[data-access="write"] { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent-text) 45%, transparent); background: var(--accent-soft); }
+    .confidence-badge[data-confidence="high"] { color: var(--ok); }
+    .confidence-badge[data-confidence="medium"], .repo-badge[data-access="granted"] { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+    .confidence-badge[data-confidence="manual"] { color: var(--text); }
+    .repo-badge[data-access="missing"] { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+    .also-badge { border-style: dashed; color: var(--accent-text); }
+    .also-badges { display: contents; }
     .detection-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
-    .detection-badge,
-    .confidence-badge {
-      padding: 3px 7px;
-      border: 1px solid var(--ts-border);
-      border-radius: 999px;
-      font-size: 0.82em;
+    /* Repositories as a node graph: the write target on top, others on labeled connectors below. */
+    .repos-list {
+      --node-write: var(--ok);
+      --node-granted: var(--warn);
+      --node-read: var(--muted);
+      --node-missing: var(--danger);
+      display: grid;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      /* Dotted canvas, like a diagram board. */
+      background-color: var(--bg);
+      background-image: radial-gradient(color-mix(in srgb, var(--muted) 28%, transparent) 1px, transparent 1px);
+      background-size: 14px 14px;
     }
+    .repo-node {
+      --node-color: var(--node-read);
+      position: relative;
+      z-index: 1;
+      display: grid;
+      gap: 8px;
+      padding: 10px 11px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      background: var(--surface);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+    }
+    .repo-node[data-access="write"] {
+      --node-color: var(--node-write);
+      border-color: color-mix(in srgb, var(--node-write) 70%, transparent);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--node-write) 25%, transparent), 0 0 14px color-mix(in srgb, var(--node-write) 22%, transparent);
+    }
+    .repo-node[data-access="granted"] { --node-color: var(--node-granted); border-color: color-mix(in srgb, var(--node-granted) 55%, transparent); }
+    .repo-node[data-access="missing"] { --node-color: var(--node-missing); border-style: dashed; border-color: color-mix(in srgb, var(--node-missing) 60%, transparent); }
 
-    .detection-badge { border-color: var(--ts-accent); color: var(--ts-accent); background: var(--ts-accent-soft); }
-    .confidence-badge { color: var(--ts-muted); }
-    .confidence-badge[data-confidence="high"] { border-color: var(--ts-accent); color: var(--ts-accent); }
-    .confidence-badge[data-confidence="medium"] { color: var(--ts-warn); }
+    .repo-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .repo-tile {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      flex: 0 0 34px;
+      border-radius: 8px;
+      color: var(--node-color);
+      background: color-mix(in srgb, var(--node-color) 16%, var(--field));
+      font-size: 0.78em;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+    }
+    .repo-copy { display: grid; min-width: 0; flex: 1; }
+    .repo-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+    .repo-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 0.8em; }
+    .repo-dot {
+      width: 9px;
+      height: 9px;
+      flex: 0 0 9px;
+      align-self: flex-start;
+      margin-top: 3px;
+      border-radius: 50%;
+      background: var(--node-color);
+      box-shadow: 0 0 6px var(--node-color);
+    }
+    .repo-node[data-access="read"] .repo-dot { background: transparent; border: 1.5px solid var(--node-read); box-shadow: none; }
 
+    .repo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+    .repo-actions { display: flex; align-items: center; gap: 4px; }
+    .repo-more { position: relative; }
+    .repo-more > summary {
+      display: grid;
+      place-items: center;
+      width: 26px;
+      height: 26px;
+      border: 1px solid var(--border-strong);
+      border-radius: 50%;
+      color: var(--muted);
+      cursor: pointer;
+      list-style: none;
+      font-size: 0.72em;
+      letter-spacing: 0.05em;
+    }
+    .repo-more > summary::-webkit-details-marker { display: none; }
+    .repo-more > summary:hover, .repo-more[open] > summary { color: var(--text); background: var(--hover); }
+    .repo-menu {
+      position: absolute;
+      right: 0;
+      top: calc(100% + 4px);
+      z-index: 3;
+      display: grid;
+      gap: 4px;
+      min-width: 150px;
+      padding: 6px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
+    }
+    .repo-menu button { justify-content: flex-start; }
+    /* Nodes stack in order, so the one with an open menu comes forward to keep the menu on top. */
+    .repo-branch:has(.repo-more[open]), .repo-node:has(.repo-more[open]) { z-index: 5; }
+
+    /* Connectors: a dashed trunk from the write target, one branch per repository, labeled by relation. */
+    .repo-branches {
+      --trunk: color-mix(in srgb, var(--muted) 55%, transparent);
+      /* Where a connector meets a node: below the edge label, at the node's head. */
+      --joint: 44px;
+      display: grid;
+      gap: 14px;
+      margin-left: 20px;
+      padding: 18px 0 0 18px;
+    }
+    .repo-branch { --edge-color: var(--trunk); position: relative; display: grid; gap: 4px; }
+    .repo-branch[data-access="granted"] { --edge-color: var(--node-granted); }
+    .repo-branch[data-access="missing"] { --edge-color: var(--node-missing); }
+    /* Each branch draws the trunk down from the one above, so the trunk ends at the last connector. */
+    .repo-branch::after {
+      content: '';
+      position: absolute;
+      left: -18px;
+      top: -14px;
+      height: calc(var(--joint) + 14px);
+      border-left: 2px dashed var(--trunk);
+    }
+    .repo-branch:first-child::after { top: -18px; height: calc(var(--joint) + 18px); }
+    .repo-branch::before {
+      content: '';
+      position: absolute;
+      left: -18px;
+      top: var(--joint);
+      width: 18px;
+      border-top: 2px dashed var(--edge-color);
+    }
+    .repo-branch[data-access="granted"]::before { border-top-style: solid; }
+    .repo-edge {
+      justify-self: start;
+      padding: 0 8px;
+      border: 1px solid var(--edge-color);
+      border-radius: 999px;
+      color: var(--muted);
+      background: var(--bg);
+      font-size: 0.75em;
+      line-height: 1.6;
+    }
+    .repo-branch[data-access="granted"] .repo-edge { color: var(--node-granted); }
+    .repo-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
+    .repo-controls .field { flex: 0 1 150px; }
+    .repo-controls .toolbar { flex: 1 1 auto; justify-content: flex-end; }
+
+    /* Prompt clarity */
     .analysis {
       display: grid;
-      gap: 5px;
-      padding: 8px 9px;
-      border: 1px solid var(--ts-border);
-      border-radius: 6px;
-      background: var(--ts-input);
+      gap: 4px;
+      padding: 9px 10px;
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--muted);
+      border-radius: var(--radius-sm);
+      background: var(--field);
     }
+    .analysis:has(.analysis-level[data-level="high"]) { border-left-color: var(--ok); }
+    .analysis:has(.analysis-level[data-level="medium"]) { border-left-color: var(--warn); }
+    .analysis:has(.analysis-level[data-level="low"]) { border-left-color: var(--danger); }
+    .analysis-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; font-weight: 600; font-size: 0.92em; }
+    .analysis-level { font-size: 0.85em; color: var(--muted); }
+    .analysis-level[data-level="high"] { color: var(--ok); }
+    .analysis-level[data-level="medium"] { color: var(--warn); }
+    .analysis-level[data-level="low"] { color: var(--danger); }
+    .analysis-hints { margin: 0; padding-left: 18px; color: var(--muted); font-size: 0.88em; }
 
-    .analysis-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; font-weight: 600; }
-    .analysis-level { font-size: 0.82em; font-weight: 600; color: var(--ts-muted); }
-    .analysis-level[data-level="high"] { color: var(--ts-accent); }
-    .analysis-level[data-level="medium"] { color: var(--ts-warn); }
-    .analysis-level[data-level="low"] { color: var(--ts-danger); }
-    .analysis-hints { margin: 0; padding-left: 18px; color: var(--ts-muted); font-size: 0.88em; line-height: 1.45; }
-
-    .history-list { display: grid; gap: 5px; }
-    .history-item { width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
-
-    .token-comparison {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 6px;
-    }
-
+    /* Result */
+    .token-comparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
     .token-metric {
       display: grid;
-      gap: 2px;
+      gap: 1px;
       min-width: 0;
-      padding: 7px;
-      border: 1px solid var(--ts-border);
-      border-radius: 6px;
-      background: var(--ts-input);
-      text-align: center;
+      padding: 7px 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--field);
     }
+    .token-metric span { color: var(--muted); font-size: 0.78em; }
+    .token-metric strong { overflow: hidden; text-overflow: ellipsis; font-size: 1.05em; font-variant-numeric: tabular-nums; }
+    .history-list { display: grid; gap: 4px; }
+    .history-item { width: 100%; justify-content: flex-start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
 
-    .token-metric span { color: var(--ts-muted); font-size: 0.78em; }
-    .token-metric strong { overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
-
-    details.advanced {
-      border: 1px solid var(--ts-accent-border);
-      border-radius: 7px;
-      padding: 9px;
-      background: var(--ts-accent-soft);
-    }
-
+    /* Inline disclosure inside a card */
+    details.advanced { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--field); }
     details.advanced > summary {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 10px;
       cursor: pointer;
+      list-style: none;
       font-weight: 600;
-      color: var(--ts-text);
+      font-size: 0.92em;
     }
+    details.advanced > summary::-webkit-details-marker { display: none; }
+    details.advanced > summary:hover { background: var(--hover); }
+    details.advanced > summary::before { content: '›'; display: inline-block; width: 10px; color: var(--muted); transition: transform 120ms ease; }
+    details.advanced[open] > summary::before { transform: rotate(90deg); }
+    .advanced-content { display: grid; gap: 10px; padding: 4px 10px 10px; }
 
-    .advanced-content { display: grid; gap: 9px; padding-top: 10px; }
-
-    fieldset {
-      min-width: 0;
-      margin: 0;
-      border: 1px solid var(--ts-border);
-      border-radius: 6px;
-      padding: 8px;
-    }
-
-    legend { font-weight: 600; }
+    fieldset { min-width: 0; margin: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; }
+    legend { padding: 0 4px; font-weight: 600; font-size: 0.92em; }
     .context-files { display: grid; gap: 6px; }
     .context-file { display: flex; gap: 7px; align-items: flex-start; font-weight: 400; overflow-wrap: anywhere; }
-    .context-file input { width: auto; margin-top: 2px; }
-    input[type="checkbox"] { accent-color: var(--ts-accent); }
-
+    .context-file input { margin-top: 3px; }
     .architecture-preview {
       max-height: 160px;
       overflow: auto;
       margin: 0;
       padding: 8px;
-      border: 1px solid var(--ts-border-strong);
-      border-radius: 6px;
-      color: var(--ts-text);
-      background: var(--ts-input);
-      font-family: var(--vscode-editor-font-family);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg);
+      font-family: var(--mono);
       font-size: var(--vscode-editor-font-size);
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
 
-    .hint,
-    .status {
-      margin: 0;
-      color: var(--ts-muted);
-      font-size: 0.88em;
-      line-height: 1.4;
-    }
-
+    /* Text */
+    .hint, .status { margin: 0; color: var(--muted); font-size: 0.86em; }
+    label .hint, summary .hint { font-weight: 400; }
+    .stats { white-space: nowrap; font-variant-numeric: tabular-nums; }
     .status:not(:empty) {
-      padding: 7px 8px;
-      border-left: 2px solid var(--ts-accent);
-      border-radius: 3px;
-      background: var(--ts-accent-soft);
+      padding: 6px 9px;
+      border-left: 2px solid var(--accent-text);
+      border-radius: 4px;
+      color: var(--text);
+      background: var(--accent-soft);
+    }
+    .error { margin: 0; color: var(--danger); font-size: 0.9em; }
+    .footer-note { padding: 0 4px 14px; text-align: center; }
+    /* Journey: Compose › Refine › Review › Use. Compose and Review are also the two views. */
+    .journey { margin: 0 0 var(--gap); }
+    .journey ol { display: flex; gap: 4px; margin: 0; padding: 0; list-style: none; }
+    .journey li { flex: 1 1 0; min-width: 0; }
+    .journey-step {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      width: 100%;
+      min-height: 30px;
+      padding: 4px 6px;
+      border: 1px solid transparent;
+      border-bottom: 2px solid var(--border);
+      border-radius: 0;
+      color: var(--muted);
+      background: transparent;
+      font-size: 0.88em;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    button.journey-step:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+    .journey-dot {
+      display: inline-grid;
+      place-items: center;
+      width: 18px;
+      height: 18px;
+      flex: 0 0 18px;
+      border: 1px solid var(--border-strong);
+      border-radius: 50%;
+      font-size: 0.82em;
+    }
+    .journey li[data-state="current"] .journey-step { color: var(--text); border-bottom-color: var(--accent); }
+    .journey li[data-state="current"] .journey-dot { color: var(--accent-fg); border-color: var(--accent); background: var(--accent); }
+    .journey li[data-state="done"] .journey-step { color: var(--text); border-bottom-color: color-mix(in srgb, var(--ok) 60%, transparent); }
+    .journey li[data-state="done"] .journey-dot { color: var(--bg); border-color: var(--ok); background: var(--ok); }
+    .journey li[data-state="busy"] .journey-dot { border-color: var(--accent); border-top-color: transparent; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .view { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
+
+    /* Hierarchy: the main card stands out; the workspace and utilities step back. */
+    .primary-card { border-color: color-mix(in srgb, var(--accent-text) 30%, var(--border)); }
+    .primary-card > .section-title h2 { font-size: 1rem; }
+    #raw-prompt { min-height: 140px; }
+    .workspace { background: transparent; }
+    .subsection { display: grid; gap: 8px; padding-top: var(--gap); border-top: 1px solid var(--border); }
+    .subsection-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+    .subsection-head h3 { margin: 0; font-size: 0.92em; font-weight: 600; }
+    details.advanced.nested { background: transparent; }
+
+    /* Attached context, each removable before refining. */
+    .context-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .context-chips:empty { display: none; }
+    .context-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      max-width: 100%;
+      padding: 1px 2px 1px 9px;
+      border: 1px solid color-mix(in srgb, var(--accent-text) 45%, transparent);
+      border-radius: 999px;
+      color: var(--accent-text);
+      background: var(--accent-soft);
+      font-size: 0.82em;
+    }
+    .context-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .context-chip button { min-height: 20px; width: 20px; padding: 0; border-radius: 50%; color: inherit; background: transparent; font-weight: 400; }
+    .context-chip button:hover:not(:disabled) { background: var(--hover); }
+
+    /* One dominant action per view, kept in reach at the bottom. */
+    .action-bar {
+      position: sticky;
+      bottom: 0;
+      z-index: 2;
+      display: grid;
+      gap: 6px;
+      padding: 8px 0 10px;
+      background: linear-gradient(to bottom, transparent, var(--bg) 30%);
+    }
+    .action-hint { text-align: center; }
+    .action-hint:empty { display: none; }
+    .cta[aria-busy="true"] { cursor: progress; }
+
+    .banner {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent);
+      border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--warn) 10%, transparent);
+      font-size: 0.9em;
+    }
+    .empty-state { justify-items: start; }
+    .empty-state h2 { margin: 0; font-size: 0.95rem; }
+    .review-links { justify-content: flex-start; }
+    details.utility { background: transparent; }
+    .utility-row { display: flex; justify-content: center; }
+    button.link { min-height: 24px; padding: 2px 6px; color: var(--muted); background: transparent; font-weight: 500; text-decoration: underline; text-underline-offset: 2px; }
+    button.link:hover:not(:disabled) { color: var(--text); background: transparent; }
+    button.danger-link[data-confirm="true"] { color: var(--danger); }
+
+    [hidden] { display: none !important; }
+    .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+    @media (max-width: 280px) {
+      body { padding: 8px 8px 0; }
+      .card { padding: 11px; }
+      .card.collapsible .card-body { padding: 11px; }
+      .input-row { grid-template-columns: 1fr; }
+      .local-badge, .shortcut { display: none; }
     }
 
-    .error { margin: 0; color: var(--ts-danger); }
-    .footer-note { padding: 2px 4px 8px; text-align: center; }
-    [hidden] { display: none !important; }
-
-    @media (max-width: 260px) {
-      body { padding: 8px; }
-      .card { padding: 10px; }
-      .input-row { grid-template-columns: 1fr; }
-      .local-badge { display: none; }
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; animation: none !important; }
     }
   </style>
 </head>
@@ -447,171 +719,275 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         <h1>Tokio</h1>
         <p class="hint">Focused prompts, less wandering.</p>
       </div>
-      <span class="local-badge" title="No AI or network requests">Local</span>
+      <span class="local-badge" title="No AI or network requests">● Local</span>
     </header>
 
-    <form id="refine-form" novalidate autocomplete="off">
-      <section class="card" aria-labelledby="request-heading">
-        <div class="section-title">
-          <h2 id="request-heading">Describe the change</h2>
-          <span class="step">Step 1</span>
-        </div>
+    <nav class="journey" aria-label="Progress">
+      <ol>
+        <li data-stage="compose" data-state="current">
+          <button id="stage-compose" type="button" class="journey-step" aria-current="step"><span class="journey-dot">1</span>Compose</button>
+        </li>
+        <li data-stage="refine" data-state="todo"><span class="journey-step"><span class="journey-dot">2</span>Refine</span></li>
+        <li data-stage="review" data-state="todo">
+          <button id="stage-review" type="button" class="journey-step"><span class="journey-dot">3</span>Review</button>
+        </li>
+        <li data-stage="use" data-state="todo"><span class="journey-step"><span class="journey-dot">4</span>Use</span></li>
+      </ol>
+    </nav>
 
-        <div class="field">
-          <div class="field-meta">
-            <label for="raw-prompt">Raw prompt</label>
+    <form id="refine-form" novalidate autocomplete="off">
+      <div id="compose-view" class="view">
+        <section class="card collapsible workspace" aria-labelledby="repos-heading">
+          <details id="repos-details">
+            <summary class="card-head">
+              <span class="chevron" aria-hidden="true">›</span>
+              <h2 id="repos-heading">Workspace</h2>
+              <span id="repos-summary" class="chip">tokio.repos.json</span>
+            </summary>
+            <div class="card-body">
+              <p class="hint">The agent edits only the write target. Allow edits in another repository when a task needs it.</p>
+              <div id="repos-list" class="repos-list"></div>
+              <p id="repos-order" class="hint"></p>
+              <div class="repo-controls">
+                <div class="field">
+                  <label for="repos-hours">Allow edits for</label>
+                  <select id="repos-hours">
+                    <option value="1">1 hour</option>
+                    <option value="2">2 hours</option>
+                    <option value="4" selected>4 hours</option>
+                    <option value="8">8 hours</option>
+                    <option value="24">24 hours</option>
+                  </select>
+                </div>
+                <div class="toolbar" aria-label="Repository tools">
+                  <button id="repos-map" class="secondary compact" type="button" title="Open the draggable repository map in an editor tab">⤢ Open Map</button>
+                  <button id="repos-add" class="ghost compact" type="button">+ Add Repository</button>
+                  <button id="repos-clear" class="ghost compact" type="button">Revoke All</button>
+                  <button id="repos-refresh" class="ghost compact" type="button">Refresh</button>
+                </div>
+              </div>
+              <p id="repos-status" class="status" role="status" aria-live="polite"></p>
+            </div>
+          </details>
+        </section>
+
+        <section class="card primary-card" aria-labelledby="request-heading">
+          <div class="section-title">
+            <h2 id="request-heading">Describe your change</h2>
             <span id="raw-stats" class="hint stats">0 chars · ≈0 tokens</span>
           </div>
-          <textarea id="raw-prompt" required aria-describedby="raw-hint input-error" placeholder="What should change? Include the pain point, expected behavior, and constraints."></textarea>
-          <div class="toolbar" aria-label="Raw prompt tools">
-            <button id="selection-button" class="ghost compact" type="button">Use Editor Selection</button>
-            <button id="diagnostics-button" class="ghost compact" type="button">Add Current Errors</button>
-          </div>
-          <div id="analysis" class="analysis" aria-live="polite" hidden>
-            <div class="analysis-head">
-              <span>Prompt clarity</span>
-              <span id="analysis-level" class="analysis-level" data-level="low"></span>
-            </div>
-            <ul id="analysis-hints" class="analysis-hints"></ul>
-          </div>
-          <p id="raw-hint" class="hint">Original requirements remain verbatim in the refined prompt.</p>
-          <p id="input-error" class="error" role="alert" hidden></p>
-          <p id="input-tool-status" class="status" role="status" aria-live="polite"></p>
-        </div>
 
-        <div class="field">
-          <label for="category">Work category</label>
-          <select id="category" aria-describedby="category-description">
-            <option value="auto" selected>Auto detect</option>
-            <option value="general">General</option>
-            <option value="bug">Bug Fix</option>
-            <option value="feature">Feature</option>
-            <option value="enhancement">Enhancement</option>
-            <option value="refactor">Refactor</option>
-            <option value="performance">Performance</option>
-            <option value="tests">Tests</option>
-            <option value="documentation">Documentation</option>
-            <option value="investigation">Investigation</option>
-            <option value="other">Other</option>
-          </select>
-          <div class="detection-row" aria-live="polite">
-            <span id="category-result" class="detection-badge">Detected: General</span>
-            <span id="category-confidence" class="confidence-badge" data-confidence="low">Low confidence</span>
-          </div>
-          <p id="category-description" class="hint">Auto detection is local and falls back to General when uncertain.</p>
-        </div>
-
-        <div class="field">
-          <label for="target-path">Starting file <span class="hint">optional</span></label>
-          <div class="input-row">
-            <input id="target-path" type="text" placeholder="src/features/example.ts" autocomplete="off">
-            <button id="active-file-button" class="ghost compact" type="button">Use Active File</button>
-          </div>
-        </div>
-
-        <div class="field">
-          <label for="acceptance">Done when <span class="hint">optional</span></label>
-          <textarea id="acceptance" rows="2" placeholder="Acceptance criteria, e.g. the form shows an error and the existing tests still pass."></textarea>
-        </div>
-      </section>
-
-      <section class="card" aria-labelledby="scope-heading">
-        <div class="section-title">
-          <h2 id="scope-heading">Control the scope</h2>
-          <span class="step">Step 2</span>
-        </div>
-
-        <div class="field">
-          <label for="mode">Refinement mode</label>
-          <select id="mode" aria-describedby="mode-description">
-            <option value="minimal">Minimal</option>
-            <option value="adaptive" selected>Adaptive</option>
-            <option value="strict">Strict</option>
-          </select>
-          <p id="mode-description" class="hint"></p>
-        </div>
-
-        <div class="field">
-          <label for="output-style">Prompt detail</label>
-          <select id="output-style" aria-describedby="output-style-hint">
-            <option value="compact" selected>Compact — recommended</option>
-            <option value="detailed">Detailed</option>
-          </select>
-          <p id="output-style-hint" class="hint">Compact removes repeated guidance while retaining scope and validation.</p>
-        </div>
-
-        <div class="field">
-          <label for="target">Target agent</label>
-          <select id="target" aria-describedby="target-hint">
-            <option value="generic" selected>Generic — plain labels</option>
-            <option value="claude">Claude Code — XML sections</option>
-            <option value="codex">Codex — Markdown headings</option>
-          </select>
-          <p id="target-hint" class="hint">Changes only the section format, not the content.</p>
-        </div>
-
-        <details id="context-details" class="advanced">
-          <summary>Repository context <span class="hint">optional</span></summary>
-          <div class="advanced-content">
-            <div class="field">
-              <label for="context-scope">Context access</label>
-              <select id="context-scope" aria-describedby="context-hint">
-                <option value="none" selected>None</option>
-                <option value="targeted">Targeted files</option>
-                <option value="architecture">Architecture profile + targeted</option>
-              </select>
-              <p id="context-hint" class="hint">Opt-in, read-only discovery. Scanning requires a trusted workspace.</p>
-              <button id="scan-button" class="secondary" type="button" disabled>Preview Context</button>
-              <p id="context-status" class="status" role="status" aria-live="polite"></p>
-            </div>
-
-            <div id="context-preview" class="field" hidden>
-              <fieldset>
-                <legend>Suggested starting files</legend>
-                <div id="context-files" class="context-files"></div>
-              </fieldset>
-              <div id="architecture-block" class="field" hidden>
-                <strong>Architecture profile preview</strong>
-                <pre id="architecture-preview" class="architecture-preview"></pre>
+          <div class="field">
+            <label for="raw-prompt" class="visually-hidden">Describe your change</label>
+            <textarea id="raw-prompt" required aria-describedby="raw-hint input-error" placeholder="What should change? Include the pain point, expected behavior, and constraints."></textarea>
+            <p id="input-error" class="error" role="alert" hidden></p>
+            <div id="analysis" class="analysis" aria-live="polite" hidden>
+              <div class="analysis-head">
+                <span>Prompt clarity</span>
+                <span id="analysis-level" class="analysis-level" data-level="low"></span>
               </div>
-              <p id="context-notices" class="hint"></p>
+              <ul id="analysis-hints" class="analysis-hints"></ul>
+            </div>
+            <p id="raw-hint" class="hint">Your original requirements stay verbatim in the refined prompt.</p>
+          </div>
+
+          <div class="subsection" role="group" aria-labelledby="context-heading">
+            <div class="subsection-head">
+              <h3 id="context-heading">Add context</h3>
+              <span class="hint">optional</span>
+            </div>
+            <div class="toolbar" aria-label="Add context from the editor">
+              <button id="selection-button" class="ghost compact" type="button" title="Appends the selected editor text to your description.">+ Selection</button>
+              <button id="diagnostics-button" class="ghost compact" type="button" title="Attaches the active file's errors and warnings. Replaces a block added earlier.">+ Errors</button>
+            </div>
+            <div id="context-chips" class="context-chips" aria-live="polite"></div>
+            <p id="input-tool-status" class="status" role="status" aria-live="polite"></p>
+            <div class="field-grid wide">
+              <div class="field">
+                <label for="target-path">Starting file</label>
+                <div class="input-row">
+                  <input id="target-path" type="text" placeholder="src/features/example.ts" autocomplete="off">
+                  <button id="active-file-button" class="ghost compact" type="button" title="Uses the file open in the editor.">Active File</button>
+                </div>
+              </div>
+              <div class="field">
+                <label for="acceptance">Done when</label>
+                <textarea id="acceptance" rows="2" placeholder="e.g. the form shows an error and existing tests pass."></textarea>
+              </div>
             </div>
           </div>
-        </details>
-      </section>
 
-      <button id="refine-button" class="cta" type="submit" disabled>
-        Refine Prompt <span class="shortcut">Ctrl ↵</span>
-      </button>
+          <div class="subsection field">
+            <div class="subsection-head">
+              <label for="category">Work category</label>
+              <div class="detection-row" aria-live="polite">
+                <span id="category-result" class="detection-badge">Auto detect</span>
+                <span id="category-confidence" class="confidence-badge" data-confidence="low">On Refine</span>
+                <span id="category-also" class="also-badges" hidden></span>
+              </div>
+            </div>
+            <select id="category" aria-describedby="category-description">
+              <option value="auto" selected>Auto detect</option>
+              <option value="general">General</option>
+              <optgroup label="Plan">
+                <option value="planning">Planning</option>
+                <option value="decision">Decision</option>
+                <option value="investigation">Investigation</option>
+              </optgroup>
+              <optgroup label="Build">
+                <option value="feature">Feature</option>
+                <option value="enhancement">Enhancement</option>
+                <option value="ui">UI Work</option>
+                <option value="refactor">Refactor</option>
+                <option value="performance">Performance</option>
+                <option value="migration">Migration</option>
+              </optgroup>
+              <optgroup label="Fix">
+                <option value="bug">Bug Fix</option>
+                <option value="hotfix">Production Hotfix</option>
+                <option value="security">Security</option>
+              </optgroup>
+              <optgroup label="Maintain">
+                <option value="dependency">Dependency Upgrade</option>
+                <option value="workflow">Workflow / Automation</option>
+              </optgroup>
+              <optgroup label="Support">
+                <option value="tests">Tests</option>
+                <option value="documentation">Documentation</option>
+                <option value="review">Code Review</option>
+              </optgroup>
+              <option value="other">Other</option>
+            </select>
+            <p id="category-description" class="hint">Press Refine Prompt to detect every kind of work in the prompt. Each one adds a Type or Also line for you.</p>
+          </div>
 
-      <section class="card" aria-labelledby="output-heading">
-        <div class="section-title">
-          <h2 id="output-heading">Refined prompt</h2>
-          <span id="refined-stats" class="hint stats">0 chars · ≈0 tokens</span>
+          <details id="customize-details" class="advanced">
+            <summary>Customize refinement <span id="settings-summary" class="hint"></span></summary>
+            <div class="advanced-content">
+              <div class="field-grid">
+                <div class="field">
+                  <label for="mode">Mode</label>
+                  <select id="mode" aria-describedby="mode-description">
+                    <option value="minimal">Minimal</option>
+                    <option value="adaptive" selected>Adaptive</option>
+                    <option value="strict">Strict</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="output-style">Detail</label>
+                  <select id="output-style" aria-describedby="output-style-hint" title="Compact removes repeated guidance while retaining scope and validation.">
+                    <option value="compact" selected>Compact</option>
+                    <option value="detailed">Detailed</option>
+                  </select>
+                </div>
+                <div class="field">
+                  <label for="target">Agent</label>
+                  <select id="target" aria-describedby="target-hint" title="Changes only the section format, not the content.">
+                    <option value="generic" selected>Generic</option>
+                    <option value="claude">Claude Code</option>
+                    <option value="codex">Codex</option>
+                  </select>
+                </div>
+              </div>
+              <p id="mode-description" class="hint"></p>
+              <p id="output-style-hint" class="hint" hidden>Compact removes repeated guidance while retaining scope and validation.</p>
+              <p id="target-hint" class="hint" hidden>Changes only the section format, not the content.</p>
+
+              <details id="context-details" class="advanced nested">
+                <summary>Repository context <span class="hint">read-only scan</span></summary>
+                <div class="advanced-content">
+                  <div class="field">
+                    <label for="context-scope">Context access</label>
+                    <select id="context-scope" aria-describedby="context-hint">
+                      <option value="none" selected>None</option>
+                      <option value="targeted">Targeted files</option>
+                      <option value="architecture">Architecture profile + targeted</option>
+                    </select>
+                    <p id="context-hint" class="hint">Opt-in, read-only discovery. Scanning requires a trusted workspace.</p>
+                    <button id="scan-button" class="secondary compact" type="button" disabled>Preview Context</button>
+                    <p id="context-status" class="status" role="status" aria-live="polite"></p>
+                  </div>
+
+                  <div id="context-preview" class="field" hidden>
+                    <fieldset>
+                      <legend>Suggested starting files</legend>
+                      <div id="context-files" class="context-files"></div>
+                    </fieldset>
+                    <div id="architecture-block" class="field" hidden>
+                      <strong>Architecture profile preview</strong>
+                      <pre id="architecture-preview" class="architecture-preview"></pre>
+                    </div>
+                    <p id="context-notices" class="hint"></p>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </details>
+        </section>
+
+        <div class="action-bar">
+          <button id="refine-button" class="cta" type="submit" disabled>
+            <span class="cta-label">Refine Prompt</span> <span class="shortcut">Ctrl ↵</span>
+          </button>
+          <p id="refine-hint" class="hint action-hint" aria-live="polite"></p>
         </div>
-        <textarea id="refined-prompt" aria-describedby="result-status" placeholder="Your editable, scoped prompt will appear here."></textarea>
-        <div class="token-comparison" aria-label="Estimated prompt token comparison">
-          <div class="token-metric"><span>Raw input</span><strong id="raw-token-total">≈0</strong></div>
-          <div class="token-metric"><span>Refined</span><strong id="refined-token-total">≈0</strong></div>
-          <div class="token-metric"><span>Difference</span><strong id="token-delta">0</strong></div>
+      </div>
+
+      <div id="review-view" class="view" hidden>
+        <div id="review-empty" class="card empty-state">
+          <h2>Nothing to review yet</h2>
+          <p class="hint">Describe your change in Compose, then press Refine Prompt.</p>
+          <button id="review-compose-button" class="secondary" type="button">Go to Compose</button>
         </div>
-        <p class="hint">Prompt-only estimates use characters ÷ 4. Actual model and end-to-end usage will differ.</p>
-        <div class="output-actions" aria-label="Refined prompt tools">
-          <button id="copy-button" type="button">Copy Prompt</button>
-          <button id="open-button" class="secondary" type="button">Open in Editor</button>
-          <button id="clear-button" class="ghost" type="button">Clear</button>
+
+        <section id="review-content" class="card primary-card" aria-labelledby="output-heading">
+          <div id="stale-banner" class="banner" role="status" hidden>
+            <span>Your inputs changed since this result.</span>
+            <button id="refine-again-button" class="compact" type="button">Refine Again</button>
+          </div>
+          <div class="section-title">
+            <h2 id="output-heading">Refined prompt</h2>
+            <span id="refined-stats" class="hint stats">0 chars · ≈0 tokens</span>
+          </div>
+          <textarea id="refined-prompt" aria-label="Refined prompt" aria-describedby="result-status" placeholder="Your editable, scoped prompt will appear here."></textarea>
+          <p id="result-status" class="status" role="status" aria-live="polite"></p>
+          <div class="token-comparison" aria-label="Estimated prompt token comparison">
+            <div class="token-metric"><span>Original</span><strong id="raw-token-total">≈0</strong></div>
+            <div class="token-metric"><span>Refined</span><strong id="refined-token-total">≈0</strong></div>
+            <div class="token-metric"><span>Difference</span><strong id="token-delta">0</strong></div>
+          </div>
+          <details id="compare-details" class="advanced">
+            <summary>Compare with original</summary>
+            <div class="advanced-content">
+              <pre id="original-preview" class="architecture-preview"></pre>
+            </div>
+          </details>
+          <div class="toolbar review-links">
+            <button id="edit-original-button" class="ghost compact" type="button">← Edit Original</button>
+          </div>
+        </section>
+
+        <div class="action-bar">
+          <div class="output-actions" aria-label="Use the refined prompt">
+            <button id="copy-button" type="button">Copy Prompt</button>
+            <button id="open-button" class="secondary" type="button">Open in Editor</button>
+          </div>
+          <p class="hint action-hint">Estimates use characters ÷ 4. Actual model usage will differ.</p>
         </div>
-        <p id="result-status" class="status" role="status" aria-live="polite"></p>
-        <details id="history-details" class="advanced">
+
+        <details id="history-details" class="advanced utility">
           <summary>History <span id="history-count" class="hint"></span></summary>
           <div class="advanced-content">
             <div id="history-list" class="history-list"></div>
             <button id="history-clear" class="ghost compact" type="button">Clear history</button>
           </div>
         </details>
-      </section>
+        <div class="utility-row">
+          <button id="clear-button" class="link danger-link" type="button">Clear everything…</button>
+        </div>
+      </div>
 
-      <p class="hint footer-note">Everything runs locally. Review, copy, and paste manually into your coding agent.</p>
+      <p class="hint footer-note">Everything runs locally. Review, copy, and paste into your coding agent.</p>
     </form>
   </main>
 
@@ -637,6 +1013,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const categoryResult = document.getElementById('category-result');
       const categoryConfidence = document.getElementById('category-confidence');
       const categoryDescription = document.getElementById('category-description');
+      const categoryAlso = document.getElementById('category-also');
       const targetPath = document.getElementById('target-path');
       const activeFileButton = document.getElementById('active-file-button');
       const mode = document.getElementById('mode');
@@ -662,6 +1039,42 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const clearButton = document.getElementById('clear-button');
       const inputError = document.getElementById('input-error');
       const resultStatus = document.getElementById('result-status');
+      const reposDetails = document.getElementById('repos-details');
+      const reposSummary = document.getElementById('repos-summary');
+      const reposList = document.getElementById('repos-list');
+      const reposOrder = document.getElementById('repos-order');
+      const reposHours = document.getElementById('repos-hours');
+      const reposAdd = document.getElementById('repos-add');
+      const reposMap = document.getElementById('repos-map');
+      const reposClear = document.getElementById('repos-clear');
+      const reposRefresh = document.getElementById('repos-refresh');
+      const reposStatus = document.getElementById('repos-status');
+      let reposRequestId = 0;
+      let pendingReposRequestId = 0;
+      let reposLoaded = false;
+
+      // Journey: Compose and Review are two views of one task; Refine and Use are tracked as steps.
+      const composeView = document.getElementById('compose-view');
+      const reviewView = document.getElementById('review-view');
+      const stageCompose = document.getElementById('stage-compose');
+      const stageReview = document.getElementById('stage-review');
+      const journeySteps = Array.from(document.querySelectorAll('.journey li'));
+      const contextChips = document.getElementById('context-chips');
+      const settingsSummary = document.getElementById('settings-summary');
+      const refineHint = document.getElementById('refine-hint');
+      const refineLabel = refineButton.querySelector('.cta-label');
+      const reviewEmpty = document.getElementById('review-empty');
+      const reviewContent = document.getElementById('review-content');
+      const staleBanner = document.getElementById('stale-banner');
+      const refineAgainButton = document.getElementById('refine-again-button');
+      const editOriginalButton = document.getElementById('edit-original-button');
+      const reviewComposeButton = document.getElementById('review-compose-button');
+      const originalPreview = document.getElementById('original-preview');
+      let view = 'compose';
+      let refining = false;
+      let used = false;
+      let refinedFrom = '';
+      let clearArmedTimer;
 
       let requestId = 0;
       let pendingRequestId = 0;
@@ -694,6 +1107,9 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         outputStyle.value = savedState.outputStyle || 'compact';
         contextScope.value = savedState.contextScope || 'none';
         refinedPrompt.value = savedState.refinedPrompt || '';
+        view = savedState.view === 'review' ? 'review' : 'compose';
+        used = savedState.used === true;
+        refinedFrom = savedState.refinedFrom || '';
       }
       contextDetails.open = contextScope.value !== 'none';
 
@@ -708,14 +1124,143 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           refinedPrompt: refinedPrompt.value,
           acceptance: acceptance.value,
           target: target.value,
-          history
+          history,
+          view,
+          used,
+          refinedFrom
         });
+        markIfStale();
+        renderContextChips();
+        updateSettingsSummary();
+        updateJourney();
+      };
+
+      // Snapshot of the inputs behind the shown result, so a later change is visibly pending.
+      let refinedSettings = '';
+      let settingsAtRequest = '';
+      const staleMessage = 'Inputs changed since the last refine. Press Refine Prompt to update the result.';
+      const currentSettings = () => JSON.stringify([
+        rawPrompt.value, category.value, targetPath.value, mode.value, outputStyle.value,
+        target.value, acceptance.value, contextScope.value
+      ]);
+      const markIfStale = () => {
+        const stale = refinedSettings !== '' && refinedPrompt.value.length > 0
+          && currentSettings() !== refinedSettings;
+        refineButton.classList.toggle('stale', stale);
+        // The banner in Review carries the stale notice; the status line keeps only action results.
+        staleBanner.hidden = !stale;
+        if (resultStatus.textContent === staleMessage) {
+          resultStatus.textContent = '';
+        }
       };
 
       // Removes a block previously added by "Add Current Errors" so a refresh replaces it.
       const stripErrorBlock = (text) => text
         .replace(/(?:^|\\n\\n)Current errors:\\n(?:[^\\n]*:\\d+:\\d+ (?:error|warning)[^\\n]*(?:\\n|$))+/g, '')
         .trim();
+      const errorBlockLines = (text) => {
+        const block = /(?:^|\\n\\n)Current errors:\\n((?:[^\\n]*:\\d+:\\d+ (?:error|warning)[^\\n]*(?:\\n|$))+)/.exec(text);
+        return block ? block[1].trim().split('\\n').length : 0;
+      };
+
+      const showView = (next, focus) => {
+        view = next;
+        composeView.hidden = next !== 'compose';
+        reviewView.hidden = next !== 'review';
+        window.scrollTo({ top: 0 });
+        if (focus) {
+          (next === 'compose' ? rawPrompt : refinedPrompt).focus({ preventScroll: true });
+        }
+        saveState();
+      };
+
+      const updateJourney = () => {
+        const hasResult = refinedPrompt.value.length > 0;
+        const stale = !staleBanner.hidden;
+        const states = {
+          compose: view === 'compose' ? 'current' : hasResult ? 'done' : 'todo',
+          refine: refining ? 'busy' : hasResult && !stale ? 'done' : 'todo',
+          review: view === 'review' ? 'current' : hasResult ? 'done' : 'todo',
+          use: used && !stale ? 'done' : 'todo'
+        };
+        journeySteps.forEach((step) => {
+          step.dataset.state = states[step.dataset.stage];
+        });
+        stageCompose.setAttribute('aria-current', view === 'compose' ? 'step' : 'false');
+        stageReview.setAttribute('aria-current', view === 'review' ? 'step' : 'false');
+        reviewEmpty.hidden = hasResult;
+        reviewContent.hidden = !hasResult;
+        copyButton.disabled = !hasResult;
+        openButton.disabled = !hasResult;
+      };
+
+      // One readable line for the collapsed settings, so defaults are visible without opening them.
+      const updateSettingsSummary = () => {
+        const label = (select) => select.options[select.selectedIndex]?.text || '';
+        const context = contextScope.value === 'none' ? 'no repo context' : label(contextScope);
+        settingsSummary.textContent = [label(mode), label(outputStyle), label(target), context].join(' · ');
+      };
+
+      const afterContextChange = (message) => {
+        inputToolStatus.textContent = message;
+        invalidateContext(true);
+        updateRefineAvailability();
+        updateStats();
+        requestCategoryClassification();
+        saveState();
+      };
+
+      // Attached context, each with a remove button, so it can be checked before refining.
+      const renderContextChips = () => {
+        const chips = [];
+        const errors = errorBlockLines(rawPrompt.value);
+        if (errors > 0) {
+          chips.push([errors + (errors === 1 ? ' error attached' : ' errors attached'), 'Remove the attached errors', () => {
+            rawPrompt.value = stripErrorBlock(rawPrompt.value);
+            afterContextChange('Removed the attached errors.');
+          }]);
+        }
+        if (targetPath.value.trim()) {
+          chips.push(['Start: ' + targetPath.value.trim(), 'Clear the starting file', () => {
+            targetPath.value = '';
+            afterContextChange('Cleared the starting file.');
+          }]);
+        }
+        if (acceptance.value.trim()) {
+          chips.push(['Done-when set', 'Clear the completion criteria', () => {
+            acceptance.value = '';
+            afterContextChange('Cleared the completion criteria.');
+          }]);
+        }
+        contextChips.replaceChildren(...chips.map(([text, title, remove]) => {
+          const chip = document.createElement('span');
+          chip.className = 'context-chip';
+          const label = document.createElement('span');
+          label.textContent = text;
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.textContent = '×';
+          button.title = title;
+          button.setAttribute('aria-label', title);
+          button.addEventListener('click', remove);
+          chip.append(label, button);
+          return chip;
+        }));
+      };
+
+      const finishRefining = () => {
+        refining = false;
+        refineLabel.textContent = 'Refine Prompt';
+        refineButton.removeAttribute('aria-busy');
+        updateRefineAvailability();
+        updateJourney();
+      };
+
+      const disarmClear = () => {
+        clearTimeout(clearArmedTimer);
+        delete clearButton.dataset.confirm;
+        clearButton.textContent = 'Clear everything…';
+      };
 
       const renderAnalysis = (analysis) => {
         analysisHints.replaceChildren();
@@ -752,13 +1297,18 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           button.addEventListener('click', () => {
             rawPrompt.value = entry.raw || '';
             refinedPrompt.value = entry.refined || '';
+            // The settings behind a history entry are unknown, so do not flag it as stale.
+            refinedSettings = '';
             outputRevision += 1;
             invalidateContext(true);
             updateRefineAvailability();
             updateStats();
             requestCategoryClassification();
             resultStatus.textContent = 'Restored from history.';
-            saveState();
+            refinedFrom = entry.raw || '';
+            originalPreview.textContent = refinedFrom;
+            used = false;
+            showView('review');
           });
           historyList.appendChild(button);
         });
@@ -778,8 +1328,16 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const updateRefineAvailability = () => {
         const isBlank = rawPrompt.value.trim().length === 0;
         const needsContext = contextScope.value !== 'none';
-        refineButton.disabled = isBlank || (needsContext && !contextPreview);
+        refineButton.disabled = refining || isBlank || (needsContext && !contextPreview);
         scanButton.disabled = isBlank || !needsContext;
+        // Say why Refine is unavailable instead of leaving a silent disabled button.
+        refineHint.textContent = refining
+          ? 'Refining locally…'
+          : isBlank
+            ? 'Describe your change to enable Refine.'
+            : needsContext && !contextPreview
+              ? 'Preview repository context in Customize refinement, or set Context access to None.'
+              : '';
         if (!isBlank) {
           inputError.hidden = true;
           inputError.textContent = '';
@@ -818,18 +1376,49 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const categoryLabels = {
         general: 'General',
         bug: 'Bug Fix',
+        hotfix: 'Production Hotfix',
         feature: 'Feature',
         enhancement: 'Enhancement',
+        ui: 'UI Work',
         refactor: 'Refactor',
         performance: 'Performance',
         tests: 'Tests',
         documentation: 'Documentation',
         investigation: 'Investigation',
+        decision: 'Decision',
+        planning: 'Planning',
+        workflow: 'Workflow / Automation',
+        security: 'Security',
+        migration: 'Migration',
+        dependency: 'Dependency Upgrade',
+        review: 'Code Review',
         other: 'Other'
+      };
+
+      const renderAlso = (additional) => {
+        const labels = (additional || []).map((value) => categoryLabels[value]).filter(Boolean);
+        categoryAlso.replaceChildren(...labels.map((label) => {
+          const badge = document.createElement('span');
+          badge.className = 'also-badge';
+          badge.textContent = '+ ' + label;
+          return badge;
+        }));
+        categoryAlso.hidden = labels.length === 0;
+      };
+
+      // Auto detect runs when Refine is pressed, so the badge waits for it.
+      const renderPendingDetection = () => {
+        renderAlso([]);
+        resolvedCategory = 'general';
+        categoryResult.textContent = 'Auto detect';
+        categoryConfidence.textContent = 'On Refine';
+        categoryConfidence.dataset.confidence = 'low';
+        categoryDescription.textContent = 'Press Refine Prompt to detect every kind of work in the prompt. Each one adds a Type or Also line for you.';
       };
 
       const renderCategory = (classification) => {
         if (category.value !== 'auto') {
+          renderAlso([]);
           resolvedCategory = category.value;
           categoryResult.textContent = 'Manual: ' + categoryLabels[resolvedCategory];
           categoryConfidence.textContent = 'Override';
@@ -844,23 +1433,25 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         categoryResult.textContent = 'Detected: ' + categoryLabels[resolvedCategory];
         categoryConfidence.textContent = confidence.charAt(0).toUpperCase() + confidence.slice(1) + ' confidence';
         categoryConfidence.dataset.confidence = confidence;
-        categoryDescription.textContent = signals.length > 0
+        const additional = classification?.additional || [];
+        renderAlso(additional);
+        categoryDescription.textContent = (signals.length > 0
           ? 'Matched signals: ' + signals.join(', ') + '.'
-          : 'No clear category signal; General keeps the prompt assumption-free.';
+          : 'No clear category signal; General keeps the prompt assumption-free.')
+          + (additional.length > 0 ? ' Also found: each extra category adds one guidance line.' : '');
       };
 
-      const requestCategoryClassification = () => {
+      const requestCategoryClassification = (delay = 180) => {
         clearTimeout(classificationTimer);
         pendingClassificationRequestId = 0;
-        if (category.value !== 'auto') {
+        if (category.value === 'auto') {
+          renderPendingDetection();
+        } else {
           renderCategory();
         }
         if (rawPrompt.value.trim().length === 0) {
           pendingClassificationRequestId = 0;
           renderAnalysis(undefined);
-          if (category.value === 'auto') {
-            renderCategory({ category: 'general', confidence: 'low', matchedSignals: [] });
-          }
           return;
         }
 
@@ -873,7 +1464,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             rawPrompt: rawPrompt.value,
             category: category.value === 'auto' ? undefined : category.value
           });
-        }, 180);
+        }, delay);
       };
 
       const requestEditorTool = (tool, text) => {
@@ -946,12 +1537,13 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         };
       };
 
-      rawPrompt.addEventListener('input', () => {
+      rawPrompt.addEventListener('input', (event) => {
         inputToolStatus.textContent = '';
         invalidateContext(true);
         updateRefineAvailability();
         updateStats();
-        requestCategoryClassification();
+        // A paste is a finished thought, so show its categories at once instead of waiting for typing to pause.
+        requestCategoryClassification(event.inputType === 'insertFromPaste' ? 0 : 180);
         saveState();
       });
       category.addEventListener('change', () => {
@@ -1040,7 +1632,16 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         });
       });
 
+      // Clear discards edited work, so it asks for a second click first.
       clearButton.addEventListener('click', () => {
+        if (clearButton.dataset.confirm !== 'true') {
+          clearButton.dataset.confirm = 'true';
+          clearButton.textContent = 'Click again to clear the prompt, result, and options';
+          clearTimeout(clearArmedTimer);
+          clearArmedTimer = setTimeout(disarmClear, 4000);
+          return;
+        }
+        disarmClear();
         rawPrompt.value = '';
         category.value = 'auto';
         resolvedCategory = 'general';
@@ -1052,6 +1653,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         contextScope.value = 'none';
         contextDetails.open = false;
         refinedPrompt.value = '';
+        refinedSettings = '';
         inputError.textContent = '';
         inputError.hidden = true;
         inputToolStatus.textContent = '';
@@ -1064,8 +1666,24 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         updateModeDescription();
         updateStats();
         requestCategoryClassification();
-        saveState();
-        rawPrompt.focus();
+        used = false;
+        refinedFrom = '';
+        originalPreview.textContent = '';
+        // A pending refine is dropped with the inputs, so its result is ignored.
+        finishRefining();
+        showView('compose', true);
+      });
+
+      stageCompose.addEventListener('click', () => showView('compose', true));
+      stageReview.addEventListener('click', () => showView('review'));
+      editOriginalButton.addEventListener('click', () => showView('compose', true));
+      reviewComposeButton.addEventListener('click', () => showView('compose', true));
+      refineAgainButton.addEventListener('click', () => {
+        if (refineButton.disabled) {
+          showView('compose', true);
+          return;
+        }
+        form.requestSubmit();
       });
 
       document.addEventListener('keydown', (event) => {
@@ -1090,9 +1708,15 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         pendingRequestId = requestId;
         outputRevisionAtRequest = outputRevision;
         pendingRawForHistory = rawPrompt.value;
+        settingsAtRequest = currentSettings();
         inputError.hidden = true;
         inputError.textContent = '';
         resultStatus.textContent = 'Refining locally…';
+        refining = true;
+        refineLabel.textContent = 'Refining…';
+        refineButton.setAttribute('aria-busy', 'true');
+        updateRefineAvailability();
+        updateJourney();
 
         vscode.postMessage({
           type: 'refine',
@@ -1108,24 +1732,194 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         });
       });
 
+      const requestRepos = (action, name) => {
+        reposRequestId += 1;
+        pendingReposRequestId = reposRequestId;
+        reposStatus.textContent = action === 'list' ? 'Reading tokio.repos.json...' : 'Updating...';
+        vscode.postMessage({
+          type: 'repos',
+          requestId: reposRequestId,
+          action,
+          name,
+          hours: action === 'grant' ? Number(reposHours.value) : undefined
+        });
+      };
+
+      const repoButton = (label, title, onClick) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'ghost compact';
+        button.textContent = label;
+        button.title = title;
+        button.addEventListener('click', onClick);
+        return button;
+      };
+
+      const formatUntil = (iso) => {
+        const date = new Date(iso);
+        return Number.isNaN(date.getTime()) ? iso : date.toLocaleString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
+      };
+
+      // Two letters for a node's tile: the first letters of the first two name parts.
+      const initials = (name) => {
+        const parts = name.split(/[-_.\\s]+/).filter(Boolean);
+        return ((parts[0] || '?').charAt(0) + (parts[1] || parts[0] || '').charAt(parts[1] ? 0 : 1)).toUpperCase();
+      };
+
+      const element = (tag, className, text) => {
+        const node = document.createElement(tag);
+        if (className) {
+          node.className = className;
+        }
+        if (text !== undefined) {
+          node.textContent = text;
+        }
+        return node;
+      };
+
+      // One repository as a node: tile, name and path, status dot, access chip, and actions.
+      const repoNode = (repo) => {
+        const state = repo.missing ? 'missing' : repo.access;
+        const node = element('div', 'repo-row repo-node');
+        node.dataset.access = state;
+
+        const head = element('div', 'repo-head');
+        const tile = element('span', 'repo-tile', initials(repo.name));
+        tile.setAttribute('aria-hidden', 'true');
+        const copy = element('div', 'repo-copy');
+        copy.append(element('strong', 'repo-name', repo.name), element('span', 'hint repo-path', repo.path));
+        copy.title = repo.path + (repo.purpose ? ' · ' + repo.purpose : '')
+          + (repo.dependsOn.length > 0 ? ' · depends on ' + repo.dependsOn.join(', ') : '');
+        const dot = element('span', 'repo-dot');
+        dot.title = state === 'write' ? 'Write target' : state === 'granted' ? 'Edits allowed' : state === 'missing' ? 'Folder missing' : 'Read-only';
+        head.append(tile, copy, dot);
+        node.append(head);
+
+        const foot = element('div', 'repo-foot');
+        const badge = element('span', 'repo-badge', state === 'missing'
+          ? 'missing'
+          : state === 'write'
+            ? 'write target'
+            : state === 'granted'
+              ? 'edits until ' + formatUntil(repo.grantedUntil)
+              : 'read-only');
+        badge.dataset.access = state;
+        foot.append(badge);
+
+        if (repo.access !== 'write') {
+          const actions = element('div', 'repo-actions');
+          // A missing folder cannot be edited, so it offers only the menu, where Remove lives.
+          if (!repo.missing) {
+            actions.append(repo.access === 'granted'
+              ? repoButton('Revoke', 'Make ' + repo.name + ' read-only again', () => requestRepos('revoke', repo.name))
+              : repoButton('Allow Edits', 'Let the agent edit ' + repo.name + ' for the chosen hours', () => requestRepos('grant', repo.name)));
+          }
+          const more = element('details', 'repo-more');
+          const summary = element('summary', '', '•••');
+          summary.title = 'More actions for ' + repo.name;
+          summary.setAttribute('aria-label', 'More actions for ' + repo.name);
+          const menu = element('div', 'repo-menu');
+          menu.append(
+            repoButton('Make Write Target', 'Make ' + repo.name + ' the default write target', () => requestRepos('setDefault', repo.name)),
+            repoButton('Remove', 'Remove ' + repo.name + ' from tokio.repos.json', () => requestRepos('remove', repo.name))
+          );
+          more.append(summary, menu);
+          actions.append(more);
+          foot.append(actions);
+        }
+        node.append(foot);
+        return node;
+      };
+
+      // How a repository relates to the write target, for the connector label.
+      const relationTo = (root, repo) => {
+        if (root && root.dependsOn.includes(repo.name)) {
+          return 'depends on';
+        }
+        if (repo.dependsOn.includes(root ? root.name : '')) {
+          return 'used by';
+        }
+        return 'linked';
+      };
+
+      // The write target is the root node; every other repository hangs off it on a labeled connector.
+      const renderRepos = (view) => {
+        reposList.replaceChildren();
+        const count = view.repos.length;
+        reposSummary.textContent = count + (count === 1 ? ' repository' : ' repositories') + ' · write: ' + view.defaultRepo;
+        const root = view.repos.find((repo) => repo.name === view.defaultRepo);
+        if (root) {
+          reposList.append(repoNode(root));
+        }
+        const others = view.repos.filter((repo) => repo !== root);
+        if (others.length > 0) {
+          const branches = element('div', 'repo-branches');
+          others.forEach((repo) => {
+            const branch = element('div', 'repo-branch');
+            branch.dataset.access = repo.missing ? 'missing' : repo.access;
+            const edge = element('span', 'repo-edge', relationTo(root, repo));
+            branch.append(edge, repoNode(repo));
+            branches.append(branch);
+          });
+          reposList.append(branches);
+        }
+
+        reposOrder.textContent = view.mergeOrder.length > 0
+          ? 'Merge order: ' + view.mergeOrder.join(' → ')
+          : view.fromFile
+            ? ''
+            : 'No tokio.repos.json yet. Add a repository to create one.';
+        reposClear.disabled = !view.repos.some((repo) => repo.access === 'granted');
+      };
+
+      reposDetails.addEventListener('toggle', () => {
+        if (reposDetails.open && !reposLoaded) {
+          requestRepos('list');
+        }
+      });
+      reposAdd.addEventListener('click', () => requestRepos('add'));
+      reposMap.addEventListener('click', () => requestRepos('openMap'));
+      reposClear.addEventListener('click', () => requestRepos('clearGrants'));
+      reposRefresh.addEventListener('click', () => requestRepos('list'));
+
       window.addEventListener('message', (event) => {
         const message = event.data;
         if (!message) {
           return;
         }
 
+        // The repository map changed the catalog, so reload it here too.
+        if (message.type === 'reposChanged') {
+          requestRepos('list');
+          return;
+        }
+
+        if (message.type === 'reposResult') {
+          if (message.requestId !== pendingReposRequestId) {
+            return;
+          }
+          if (message.view) {
+            reposLoaded = true;
+            renderRepos(message.view);
+          }
+          reposStatus.textContent = message.message;
+          return;
+        }
+
         if (message.type === 'copyResult') {
           if (message.requestId === pendingCopyRequestId) {
             resultStatus.textContent = message.message;
+            if (message.success) {
+              used = true;
+              saveState();
+            }
           }
           return;
         }
 
         if (message.type === 'classificationResult') {
           if (message.requestId === pendingClassificationRequestId) {
-            if (category.value === 'auto') {
-              renderCategory(message.classification);
-            }
+            // Only the clarity hints update while typing; categories are shown after Refine.
             renderAnalysis(message.analysis);
           }
           return;
@@ -1140,6 +1934,11 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             inputToolStatus.textContent = message.message;
           } else {
             resultStatus.textContent = message.message;
+          }
+
+          if (message.success && message.tool === 'openInEditor') {
+            used = true;
+            saveState();
           }
 
           if (message.success && message.tool === 'activeFile') {
@@ -1158,6 +1957,11 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             if (!message.success && removedOldBlock) {
               inputToolStatus.textContent = message.message + ' Removed the previous error block.';
             }
+            if (message.success) {
+              const count = errorBlockLines(rawPrompt.value);
+              inputToolStatus.textContent = count + (count === 1 ? ' error' : ' errors')
+                + (removedOldBlock ? ' attached, replacing the earlier block.' : ' attached to your description.');
+            }
             invalidateContext(true);
             updateRefineAvailability();
             updateStats();
@@ -1166,7 +1970,10 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           }
 
           if (message.success && message.tool === 'editorSelection') {
-            rawPrompt.value = message.value || '';
+            // Add to what the user already typed instead of replacing it.
+            const typed = rawPrompt.value.trim();
+            rawPrompt.value = (typed ? typed + '\\n\\n' : '') + (message.value || '');
+            inputToolStatus.textContent = 'Selection appended to your description.';
             invalidateContext(true);
             updateRefineAvailability();
             updateStats();
@@ -1202,24 +2009,36 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         }
 
         if (message.type === 'refineResult') {
+          finishRefining();
           if (outputRevision !== outputRevisionAtRequest) {
             resultStatus.textContent = 'Output changed while refining; refine again to replace it.';
+            showView('review');
             return;
           }
 
           refinedPrompt.value = message.refinedPrompt;
           addToHistory(pendingRawForHistory, message.refinedPrompt);
           outputRevision += 1;
-          resultStatus.textContent = 'Refined locally. You can edit the result.';
+          refinedSettings = settingsAtRequest;
+          if (message.classification && category.value === 'auto') {
+            renderCategory(message.classification);
+          }
+          resultStatus.textContent = 'Refined locally. Edit it here, then copy it or open it in the editor.';
+          refinedFrom = pendingRawForHistory;
+          originalPreview.textContent = refinedFrom;
+          used = false;
           updateStats();
-          saveState();
+          // Bring the result into view; the original stays one click away under Edit Original.
+          showView('review');
           return;
         }
 
         if (message.type === 'refineError') {
+          finishRefining();
           inputError.textContent = message.message || 'Unable to refine this prompt.';
           inputError.hidden = false;
           resultStatus.textContent = '';
+          showView('compose');
         }
       });
 
@@ -1240,10 +2059,17 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       });
 
       renderHistory();
+      originalPreview.textContent = refinedFrom;
       updateRefineAvailability();
       updateModeDescription();
       updateStats();
       requestCategoryClassification();
+      // Restore the view the user left, without stealing focus.
+      composeView.hidden = view !== 'compose';
+      reviewView.hidden = view !== 'review';
+      saveState();
+      // Fill the workspace summary up front, so repository status is visible while composing.
+      requestRepos('list');
     })();
   </script>
 </body>

@@ -9,12 +9,38 @@ import { promisify } from 'node:util';
 import {
   formatBenchSummary,
   parseAgentUsage,
+  createCopyWorkspace,
   parseBenchTasks,
   runBench,
   summarizeRuns
 } from './bench';
 
 const execFileAsync = promisify(execFile);
+
+test('working-tree workspace copies uncommitted files and skips build output and git metadata', async () => {
+  const source = await mkdtemp(join(tmpdir(), 'tokio-copy-src-'));
+  await mkdir(join(source, 'src'), { recursive: true });
+  await mkdir(join(source, 'out'), { recursive: true });
+  await mkdir(join(source, '.git'), { recursive: true });
+  await writeFile(join(source, 'src', 'app.ts'), 'export const uncommitted = 1;\n', 'utf8');
+  await writeFile(join(source, 'out', 'built.js'), '// build output\n', 'utf8');
+  await writeFile(join(source, '.git', 'HEAD'), 'ref\n', 'utf8');
+  await writeFile(join(source, 'tokio-0.6.0.vsix'), 'package\n', 'utf8');
+
+  const workspace = await createCopyWorkspace(source);
+  try {
+    assert.equal(existsSync(join(workspace.path, 'src', 'app.ts')), true);
+    assert.equal(existsSync(join(workspace.path, 'out')), false);
+    assert.equal(existsSync(join(workspace.path, '.git')), false);
+    assert.equal(existsSync(join(workspace.path, 'tokio-0.6.0.vsix')), false);
+  } finally {
+    await workspace.dispose();
+  }
+
+  // Disposing the copy must leave the source directory untouched.
+  assert.equal(existsSync(join(source, 'src', 'app.ts')), true);
+  assert.equal(existsSync(join(source, 'out', 'built.js')), true);
+});
 
 // Every scratch directory is removed once the file's tests finish, so repeated runs leave nothing in %TEMP%.
 const scratchDirectories: string[] = [];

@@ -2,7 +2,7 @@
   "name": "tokio",
   "displayName": "Tokio",
   "description": "Refine coding requests into concise, implementation-ready prompts locally.",
-  "version": "0.6.0",
+  "version": "0.8.3",
   "publisher": "local",
   "icon": "media/tokio-avatar.png",
   "license": "UNLICENSED",
@@ -37,6 +37,10 @@
       {
         "command": "tokio.focusView",
         "title": "Tokio: Focus View"
+      },
+      {
+        "command": "tokio.openRepositoryMap",
+        "title": "Tokio: Open Repository Map"
       }
     ],
     "viewsContainers": {
@@ -64,7 +68,7 @@
     "compile": "tsc -p ./",
     "check": "tsc -p ./ --noEmit",
     "build": "npm run clean && npm run compile",
-    "test": "npm run compile && node --test out/core/category.test.js out/core/refine.test.js out/core/analysis.test.js out/context/discovery.test.js out/context/project.test.js out/ui/messages.test.js out/ui/security.test.js out/tsconfig.test.js out/broker/audit.test.js out/broker/bench.test.js out/broker/scan.test.js out/context/repomap.test.js out/context/imports.test.js out/context/history.test.js out/broker/policy.test.js out/broker/hook.test.js out/broker/prompt-hook.test.js out/broker/init.test.js out/broker/tools.test.js out/broker/mcp.test.js out/broker/stats.test.js out/broker/route.test.js out/context/routing.test.js",
+    "test": "npm run compile && node --test out/core/category.test.js out/core/refine.test.js out/core/analysis.test.js out/context/discovery.test.js out/context/project.test.js out/ui/messages.test.js out/ui/security.test.js out/tsconfig.test.js out/broker/audit.test.js out/broker/activity.test.js out/broker/bench.test.js out/broker/scan.test.js out/context/repomap.test.js out/context/imports.test.js out/context/history.test.js out/broker/policy.test.js out/broker/hook.test.js out/broker/prompt-hook.test.js out/broker/init.test.js out/broker/tools.test.js out/broker/mcp.test.js out/broker/stats.test.js out/broker/route.test.js out/context/routing.test.js out/broker/doctor.test.js out/broker/catalog.test.js out/broker/repos.test.js out/context/packages.test.js out/broker/scope.test.js out/broker/repo-audit.test.js out/ui/repos.test.js out/broker/links.test.js out/context/php.test.js",
     "verify": "npm run check && npm test && npm run build",
     "vscode:prepublish": "npm run build"
   },

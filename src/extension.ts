@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 
-import { TokioViewProvider, VIEW_ID } from './ui/panel';
+import { RepositoryMapPanel } from './ui/map';
+import { OPEN_MAP_COMMAND, TokioViewProvider, VIEW_ID } from './ui/panel';
 
 export function activate(context: vscode.ExtensionContext): void {
   const provider = new TokioViewProvider(context.extensionUri);
@@ -11,6 +12,9 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('tokio.focusView', async () => {
       await vscode.commands.executeCommand('workbench.view.extension.tokio');
+    }),
+    vscode.commands.registerCommand(OPEN_MAP_COMMAND, () => {
+      RepositoryMapPanel.show(provider.repoCatalog, () => provider.notifyReposChanged());
     })
   );
 }

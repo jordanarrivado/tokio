@@ -2,7 +2,7 @@
   "mcpServers": {
     "tokio": {
       "command": "node",
-      "args": ["D:/token-saver/out/broker/cli.js", "mcp", "--root", "D:/token-saver"]
+      "args": ["D:/tokio/out/broker/cli.js", "mcp", "--root", "D:/tokio"]
     }
   }
 }

@@ -1,0 +1,7 @@
+[mcp_servers.tokio]
+command = "node"
+args = ["D:/tokio/out/broker/cli.js", "mcp", "--root", "D:/tokio"]
+cwd = "D:/tokio"
+
+[mcp_servers.tokio.tools.search_output]
+approval_mode = "approve"

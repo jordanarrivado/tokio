@@ -166,10 +166,26 @@ test('adds done-when criteria, validation commands, related tests, and conventio
   assert.doesNotMatch(refinePrompt({ rawPrompt: 'Fix it.' }).refinedPrompt, /Validate with|Done when/);
 });
 
-test('adds secondary category guidance', () => {
-  const result = refinePrompt({ rawPrompt: 'Fix the crash.', category: 'bug', secondaryCategory: 'tests' });
+test('adds one guidance line per additional category, skipping the primary', () => {
+  const result = refinePrompt({
+    rawPrompt: 'Fix the crash.',
+    category: 'bug',
+    additionalCategories: ['tests', 'security', 'bug']
+  });
 
-  assert.match(result.refinedPrompt, /Also: Tests — /);
+  assert.match(result.refinedPrompt, /Also: Tests — .+\nAlso: Security — /);
+  assert.doesNotMatch(result.refinedPrompt, /Also: Bug Fix/);
+});
+
+test('renders additional categories inside one Claude tag', () => {
+  const result = refinePrompt({
+    rawPrompt: 'Fix the crash.',
+    category: 'bug',
+    additionalCategories: ['tests', 'migration'],
+    target: 'claude'
+  });
+
+  assert.match(result.refinedPrompt, /<also>\nTests — .+\nMigration — .+\n<\/also>/);
 });
 
 test('renders Claude and Codex target formats without changing the task text', () => {

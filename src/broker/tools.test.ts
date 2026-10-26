@@ -129,6 +129,18 @@ test('truncated reads store the rest of the range, which search_output can query
   assert.equal(missing.isError, true);
 });
 
+test('session_stats separates this session from the all-time total kept in the audit log', async () => {
+  const root = await createRepo({ 'src/auth/login.ts': LOGIN_SOURCE });
+  await new Broker(root).callTool('repo_map', { task: 'login' });
+
+  // A new broker starts a new session, but the audit log from the earlier one is still there.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const outcome = await new Broker(root).callTool('session_stats', {});
+  assert.match(outcome.text, /this session/);
+  assert.match(outcome.text, /calls: 0 /);
+  assert.match(outcome.text, /All recorded calls for this project: [1-9]\d*,/);
+});
+
 test('invalid arguments return a tool error instead of throwing', async () => {
   const broker = new Broker(await createRepo({}));
   const outcome = await broker.callTool('repo_map', { task: 'x', budgetTokens: 5 });
@@ -178,7 +190,7 @@ test('an unknown tool name returns an error listing the valid tools', async () =
   assert.equal(outcome.isError, true);
   assert.equal(
     outcome.text,
-    'Unknown tool: delete_everything. Valid tools: refine_task, repo_map, read_symbol, search_output, session_stats, route_task, find_symbol.'
+    'Unknown tool: delete_everything. Valid tools: refine_task, repo_map, read_symbol, search_output, session_stats, route_task, find_symbol, list_repositories.'
   );
 });
 
@@ -366,4 +378,75 @@ test('find_symbol obeys input validation, the 10s timeout, and cancellation', { 
   const pending = broker.callTool('find_symbol', { name: 'Broker' });
   t.mock.timers.tick(10_000);
   assert.equal((await pending).text, 'Timed out after 10s. Narrow targetPath or the request.');
+});
+
+test('list_repositories without a catalog lists the root as the only repository and carries no estimate', async () => {
+  const root = await createRepo({ 'src/app.ts': 'export function app() {}\n' });
+  const outcome = await new Broker(root).callTool('list_repositories', {});
+  assert.equal(outcome.isError, undefined);
+  const lines = outcome.text.split('\n');
+  assert.equal(lines[0], 'No tokio.repos.json; the root is the only repository and the write target.');
+  assert.match(lines[1], /^tokio-tools-\S+  write  \S+$/);
+  assert.equal(lines.length, 2);
+  assert.doesNotMatch(outcome.text, /tokio estimate/);
+});
+
+test('list_repositories reads tokio.repos.json, marks missing paths, and gives the merge order', async () => {
+  const root = await createRepo({
+    'tokio.repos.json': JSON.stringify({
+      default: 'frontend',
+      repos: [
+        { name: 'frontend', path: 'frontend', purpose: 'React UI', dependsOn: ['shared', 'backend'] },
+        { name: 'backend', path: 'backend', dependsOn: ['shared'] },
+        { name: 'shared', path: 'shared' }
+      ]
+    }),
+    'frontend/src/app.ts': 'export function app() {}\n',
+    'shared/index.ts': 'export interface User {}\n'
+  });
+  const outcome = await new Broker(root).callTool('list_repositories', {});
+  assert.equal(outcome.isError, undefined);
+  const lines = outcome.text.split('\n');
+  assert.equal(lines[0], 'Repositories from tokio.repos.json. Write target: frontend; the others are read-only.');
+  assert.match(lines[1], /^frontend  write  \S+\/frontend  React UI \(depends on: shared, backend\)$/);
+  assert.match(lines[2], /^backend   read   \S+\/backend\s+\(depends on: shared\)  \[missing\]$/);
+  assert.match(lines[3], /^shared    read   \S+\/shared$/);
+  assert.equal(lines[4], 'Merge order: shared, backend, frontend');
+});
+
+test('an invalid catalog is an error for list_repositories and the repository-aware tools, not for refine_task', async () => {
+  const root = await createRepo({
+    'tokio.repos.json': JSON.stringify({ default: 'web', repos: [{ name: 'app', path: '.' }] }),
+    'src/auth/login.ts': LOGIN_SOURCE
+  });
+  const broker = new Broker(root);
+  const outcome = await broker.callTool('list_repositories', {});
+  assert.equal(outcome.isError, true);
+  assert.equal(outcome.text, 'Invalid tokio.repos.json: "default" must name a repository in "repos" (got "web"; names: app).');
+
+  // Repository-aware tools need the catalog, so they report the same problem. refine_task reads no files.
+  for (const [tool, args] of [
+    ['repo_map', { task: 'fix login redirect' }],
+    ['read_symbol', { path: 'src/auth/login.ts' }],
+    ['find_symbol', { name: 'login' }],
+    ['route_task', { task: 'fix login redirect' }]
+  ] as const) {
+    const failed = await broker.callTool(tool, args);
+    assert.equal(failed.isError, true, tool);
+    assert.equal(failed.text, outcome.text, tool);
+  }
+  const refined = await broker.callTool('refine_task', { task: 'fix login redirect' });
+  assert.equal(refined.isError, undefined);
+});
+
+test('list_repositories ignores unknown input fields and obeys cancellation', async () => {
+  const broker = new Broker(await createRepo({}));
+  const plain = await broker.callTool('list_repositories', {});
+  const extra = await broker.callTool('list_repositories', { verbose: true });
+  assert.equal(extra.text, plain.text);
+
+  const cancel = new AbortController();
+  cancel.abort();
+  const cancelled = await broker.callTool('list_repositories', {}, cancel.signal);
+  assert.equal(cancelled.text, 'Cancelled.');
 });

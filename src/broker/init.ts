@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { SECRET_DENY_PATTERNS } from '../context/discovery';
+import { loadCatalog } from './catalog';
 
 /**
  * Sets up one project for Claude Code and Codex. Each file is planned first, then written only when
@@ -26,7 +27,12 @@ export interface InitOptions {
 
 export const AGENTS_BEGIN = '<!-- tokio:begin -->';
 export const AGENTS_END = '<!-- tokio:end -->';
-export const PRE_TOOL_MATCHER = 'Read|Edit|Write|MultiEdit|Grep|Glob|Bash';
+export const PRE_TOOL_MATCHER = 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell';
+/**
+ * Per-user files that never belong in version control: write grants expire per machine, and the
+ * repository map's node positions are a personal arrangement.
+ */
+const PER_USER_FILES = ['.tokio/scope.json', '.tokio/layout.json'];
 const SERVER_NAME = 'tokio';
 const CODEX_TABLE = '[mcp_servers.tokio]';
 
@@ -42,6 +48,17 @@ export const TOKIO_GUIDANCE = [
   'Never read files named .env, credentials, secrets, or keys.'
 ].join('\n');
 
+/** Added to the guidance block when tokio.repos.json lists more than one repository. */
+export const MULTI_REPO_GUIDANCE = [
+  '',
+  '### Several repositories',
+  '',
+  '- Call `list_repositories` first. Pass `repo` to the other tools to target one repository.',
+  '- Edit only the write target. If another repository needs a change, stop and ask the user to run `tokio scope <repo>`.',
+  '- Use the same branch name in every repository a feature touches.',
+  '- Commit each repository on its own, and merge in the order `list_repositories` gives: dependencies first.'
+].join('\n');
+
 interface Plan {
   status: InitStatus;
   detail: string;
@@ -52,12 +69,15 @@ interface Plan {
 export async function initProject(options: InitOptions): Promise<InitResult[]> {
   const root = toPosixPath(resolve(options.root));
   const cli = toPosixPath(resolve(options.cliPath));
+  // An invalid catalog counts as one repository here; tokio doctor reports the problem.
+  const multi = await loadCatalog(root).then((catalog) => catalog.repos.length > 1, () => false);
 
   const targets: [string, (text: string | undefined) => Plan][] = [
     ['.mcp.json', (text) => planMcpConfig(text, cli, root, options.force === true)],
     ['.claude/settings.json', (text) => planClaudeSettings(text, cli, options.force === true)],
     ['.codex/config.toml', (text) => planCodexConfig(text, cli, root, options.force === true)],
-    ['AGENTS.md', (text) => planAgentsGuidance(text)]
+    ['AGENTS.md', (text) => planAgentsGuidance(text, multi)],
+    ['.gitignore', (text) => planGitignore(text)]
   ];
 
   const results: InitResult[] = [];
@@ -152,14 +172,25 @@ function planClaudeSettings(text: string | undefined, cli: string, force: boolea
 
     const owned = findOwnedHook(groups, subcommand);
     if (owned) {
-      if (owned.command === command) {
+      const missing = matcher === undefined ? [] : toolsMissingFromMatcher(owned.group.matcher);
+      if (missing.length > 0) {
+        if (!force) {
+          conflicts.push(`${event} hook does not cover ${missing.join(', ')}; kept it. Use --force to add them.`);
+        } else {
+          // Widen the existing matcher rather than replace it, so tools the user added stay covered.
+          owned.group.matcher = `${owned.group.matcher}|${missing.join('|')}`;
+          changed = true;
+          notes.push(`added ${missing.join(', ')} to the ${event} matcher.`);
+        }
+      }
+      if (owned.hook.command === command) {
         continue;
       }
       if (!force) {
         conflicts.push(`${event} runs a different tokio command; kept it. Use --force to replace.`);
         continue;
       }
-      owned.command = command;
+      owned.hook.command = command;
       changed = true;
       notes.push(`replaced ${event} hook.`);
       continue;
@@ -192,21 +223,42 @@ function secretDenyRules(): string[] {
 }
 
 /** Finds a hook command that the Tokio CLI owns for this subcommand. Owned means it runs broker/cli.js. */
-function findOwnedHook(groups: readonly unknown[], subcommand: string): Record<string, unknown> | undefined {
+function findOwnedHook(
+  groups: readonly unknown[],
+  subcommand: string
+): { hook: Record<string, unknown>; group: Record<string, unknown> } | undefined {
   for (const group of groups) {
     if (!isRecord(group) || !Array.isArray(group.hooks)) {
       continue;
     }
     for (const hook of group.hooks) {
       if (isRecord(hook) && typeof hook.command === 'string' && isOwnedCommand(hook.command, subcommand)) {
-        return hook;
+        return { hook, group };
       }
     }
   }
   return undefined;
 }
 
-function isOwnedCommand(command: string, subcommand: string): boolean {
+/**
+ * Tools from PRE_TOOL_MATCHER that a hook matcher does not match. A missing, empty or `*` matcher matches
+ * every tool; otherwise Claude Code treats it as a regular expression over the tool name.
+ */
+export function toolsMissingFromMatcher(matcher: unknown): string[] {
+  const required = PRE_TOOL_MATCHER.split('|');
+  if (typeof matcher !== 'string' || matcher === '' || matcher === '*') {
+    return [];
+  }
+  let pattern: RegExp;
+  try {
+    pattern = new RegExp(`^(?:${matcher})$`);
+  } catch {
+    return required;
+  }
+  return required.filter((tool) => !pattern.test(tool));
+}
+
+export function isOwnedCommand(command: string, subcommand: string): boolean {
   const tokens = command.replaceAll('\\', '/').trim().split(/\s+/);
   return tokens.at(-1) === subcommand && tokens.some((token) => token.endsWith('broker/cli.js'));
 }
@@ -247,8 +299,8 @@ function planCodexConfig(text: string | undefined, cli: string, root: string, fo
   return { status: 'updated', detail: 'replaced the tokio server.', content: next.join('\n') };
 }
 
-function planAgentsGuidance(text: string | undefined): Plan {
-  const block = [AGENTS_BEGIN, TOKIO_GUIDANCE, AGENTS_END].join('\n');
+function planAgentsGuidance(text: string | undefined, multi: boolean): Plan {
+  const block = [AGENTS_BEGIN, multi ? `${TOKIO_GUIDANCE}\n${MULTI_REPO_GUIDANCE}` : TOKIO_GUIDANCE, AGENTS_END].join('\n');
   if (text === undefined) {
     return { status: 'created', detail: 'created with the Tokio guidance block.', content: `${block}\n` };
   }
@@ -306,6 +358,22 @@ function shellArg(value: string): string {
 
 function tomlString(value: string): string {
   return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
+function planGitignore(text: string | undefined): Plan {
+  const lines = (text ?? '').split(/\r?\n/).map((line) => line.trim());
+  // Ignoring the whole .tokio folder covers every per-user file in it.
+  const folderIgnored = lines.some((line) => ['.tokio', '.tokio/', '/.tokio/'].includes(line));
+  const missing = folderIgnored ? [] : PER_USER_FILES.filter((file) => !lines.includes(file) && !lines.includes(`/${file}`));
+  if (missing.length === 0) {
+    return { status: 'unchanged', detail: `${PER_USER_FILES.join(' and ')} already ignored.` };
+  }
+  const base = text === undefined || text === '' || text.endsWith('\n') ? (text ?? '') : `${text}\n`;
+  return {
+    status: text === undefined ? 'created' : 'updated',
+    detail: `ignored ${missing.join(' and ')}.`,
+    content: `${base}${missing.map((file) => `${file}\n`).join('')}`
+  };
 }
 
 async function readIfExists(file: string): Promise<string | undefined> {

@@ -1,6 +1,8 @@
 import { analyzePrompt, type PromptAnalysis } from '../core/analysis';
 import { classifyWorkCategory, type CategoryClassification } from '../core/category';
 import { refinePrompt } from '../core/refine';
+import type { LinkKind } from '../broker/catalog';
+import { LINE_SHAPES, LINE_STYLES, type MapPosition, type MapSettings, type RepoCatalogService, type RepoCatalogView, type RepoGraph } from './repos';
 import type {
   ContextPreview,
   Mode,
@@ -72,6 +74,35 @@ interface ClassifyRequest {
   category?: WorkCategory;
 }
 
+type RepoAction =
+  | 'list' | 'grant' | 'revoke' | 'clearGrants' | 'setDefault' | 'add' | 'remove'
+  | 'graph' | 'addDependency' | 'removeDependency' | 'addLink' | 'removeLink' | 'saveLayout' | 'pickFile' | 'openMap';
+const REPO_ACTIONS: readonly RepoAction[] = [
+  'list', 'grant', 'revoke', 'clearGrants', 'setDefault', 'add', 'remove',
+  'graph', 'addDependency', 'removeDependency', 'addLink', 'removeLink', 'saveLayout', 'pickFile', 'openMap'
+];
+/** Actions that name one repository. */
+const NAMED_REPO_ACTIONS: readonly RepoAction[] = ['grant', 'revoke', 'setDefault', 'remove', 'pickFile'];
+/** Actions between two repositories or two `repo:path` file ends. */
+const PAIR_REPO_ACTIONS: readonly RepoAction[] = ['addDependency', 'removeDependency', 'addLink', 'removeLink'];
+const LINK_KIND_VALUES: readonly string[] = ['api', 'type', 'event', 'schema', 'config', 'other'];
+const MAX_LINK_END = 600;
+const MAX_LAYOUT_NODES = 200;
+
+interface ReposRequest {
+  type: 'repos';
+  requestId: number;
+  action: RepoAction;
+  name?: string;
+  hours?: number;
+  from?: string;
+  to?: string;
+  kind?: LinkKind;
+  note?: string;
+  positions?: Record<string, MapPosition>;
+  settings?: MapSettings;
+}
+
 export type WebviewResponse =
   | {
       type: 'refineResult';
@@ -79,6 +110,8 @@ export type WebviewResponse =
       refinedPrompt: string;
       mode: Mode;
       category: WorkCategory;
+      /** Present only for Auto detect: what was found when Refine was pressed. */
+      classification?: CategoryClassification;
     }
   | {
       type: 'refineError';
@@ -114,14 +147,31 @@ export type WebviewResponse =
       requestId: number;
       classification: CategoryClassification;
       analysis: PromptAnalysis;
+    }
+  | {
+      type: 'reposResult';
+      requestId: number;
+      success: boolean;
+      message: string;
+      /** The catalog after the action. Absent when it could not be read. */
+      view?: RepoCatalogView;
+      /** The full map data, for the graph action. */
+      graph?: RepoGraph;
+      /** A picked file path, for the pickFile action. */
+      value?: string;
     };
 
 export async function handleWebviewRequest(
   message: unknown,
   clipboard: ClipboardWriter,
   contextScanner?: ContextScanner,
-  editorTools?: EditorTools
+  editorTools?: EditorTools,
+  repoCatalog?: RepoCatalogService
 ): Promise<WebviewResponse | undefined> {
+  if (isReposRequest(message)) {
+    return useRepoCatalog(message, repoCatalog);
+  }
+
   if (isClassifyRequest(message)) {
     const classification = classifyWorkCategory(message.rawPrompt);
     return {
@@ -176,7 +226,7 @@ export async function handleWebviewRequest(
       targetPath: message.targetPath,
       mode: message.mode,
       category,
-      secondaryCategory: message.category ? undefined : classification.secondary,
+      additionalCategories: message.category ? undefined : classification.additional,
       outputStyle: message.outputStyle,
       target: message.target,
       acceptanceCriteria: message.acceptanceCriteria,
@@ -187,7 +237,8 @@ export async function handleWebviewRequest(
       requestId: message.requestId,
       refinedPrompt: result.refinedPrompt,
       mode: result.mode,
-      category: result.category
+      category: result.category,
+      ...(message.category ? {} : { classification })
     };
   } catch (error: unknown) {
     return {
@@ -195,6 +246,80 @@ export async function handleWebviewRequest(
       requestId: message.requestId,
       message: error instanceof Error ? error.message : 'Unable to refine this prompt.'
     };
+  }
+}
+
+async function useRepoCatalog(
+  message: ReposRequest,
+  repoCatalog: RepoCatalogService | undefined
+): Promise<WebviewResponse> {
+  const result = (success: boolean, text: string, view?: RepoCatalogView, extra: { graph?: RepoGraph; value?: string } = {}): WebviewResponse => ({
+    type: 'reposResult',
+    requestId: message.requestId,
+    success,
+    message: text,
+    ...(view ? { view } : {}),
+    ...(extra.graph ? { graph: extra.graph } : {}),
+    ...(extra.value !== undefined ? { value: extra.value } : {})
+  });
+  if (!repoCatalog) {
+    return result(false, 'Repository settings are unavailable.');
+  }
+
+  const name = message.name ?? '';
+  try {
+    switch (message.action) {
+      case 'list':
+        return result(true, '', await repoCatalog.list());
+      case 'grant': {
+        const hours = message.hours ?? 4;
+        return result(true, `${name} accepts edits for ${hours} hour${hours === 1 ? '' : 's'}.`, await repoCatalog.grant(name, hours));
+      }
+      case 'revoke':
+        return result(true, `${name} is read-only again.`, await repoCatalog.revoke(name));
+      case 'clearGrants':
+        return result(true, 'Only the write target accepts edits.', await repoCatalog.clearGrants());
+      case 'setDefault':
+        return result(true, `${name} is now the write target.`, await repoCatalog.setDefault(name));
+      case 'add': {
+        const view = await repoCatalog.add();
+        return view ? result(true, `Added ${view.repos.at(-1)?.name ?? 'the repository'}.`, view) : result(false, 'No folder chosen.');
+      }
+      case 'remove': {
+        const view = await repoCatalog.remove(name);
+        return view ? result(true, `Removed ${name} from the catalog.`, view) : result(false, 'Kept the repository.');
+      }
+      case 'graph':
+        return result(true, '', undefined, { graph: await repoCatalog.graph() });
+      case 'addDependency':
+        return result(true, `${message.from} now depends on ${message.to}.`, await repoCatalog.addDependency(message.from ?? '', message.to ?? ''));
+      case 'removeDependency':
+        return result(true, `${message.from} no longer depends on ${message.to}.`, await repoCatalog.removeDependency(message.from ?? '', message.to ?? ''));
+      case 'addLink':
+        return result(true, `Linked ${message.from} to ${message.to}.`, await repoCatalog.addLink({
+          from: message.from ?? '',
+          to: message.to ?? '',
+          kind: message.kind ?? 'other',
+          ...(message.note ? { note: message.note } : {})
+        }));
+      case 'removeLink':
+        return result(true, `Removed the link between ${message.from} and ${message.to}.`, await repoCatalog.removeLink(message.from ?? '', message.to ?? ''));
+      case 'saveLayout':
+        await repoCatalog.saveLayout(message.positions ?? {}, message.settings);
+        return result(true, 'Layout saved.');
+      case 'pickFile': {
+        const picked = await repoCatalog.pickFile(name);
+        return picked === undefined ? result(false, 'No file chosen.') : result(true, '', undefined, { value: picked });
+      }
+      case 'openMap':
+        repoCatalog.openMap();
+        return result(true, 'Opened the repository map.');
+    }
+  } catch (error: unknown) {
+    const text = error instanceof Error ? error.message : 'Unable to update the repositories.';
+    // Show the catalog as it is now, when it can still be read.
+    const view = await repoCatalog.list().catch(() => undefined);
+    return result(false, text, view);
   }
 }
 
@@ -341,6 +466,54 @@ function isToolRequest(message: unknown): message is ToolRequest {
     && (message.text === undefined || (typeof message.text === 'string' && message.text.length <= 200_000));
 }
 
+function isReposRequest(message: unknown): message is ReposRequest {
+  if (!isRecord(message) || message.type !== 'repos' || typeof message.requestId !== 'number') {
+    return false;
+  }
+  const action = message.action as RepoAction;
+  if (!REPO_ACTIONS.includes(action)) {
+    return false;
+  }
+  if (NAMED_REPO_ACTIONS.includes(action) && (typeof message.name !== 'string' || message.name.length === 0 || message.name.length > 64)) {
+    return false;
+  }
+  const isEnd = (value: unknown): boolean => typeof value === 'string' && value.length > 0 && value.length <= MAX_LINK_END;
+  if (PAIR_REPO_ACTIONS.includes(action) && (!isEnd(message.from) || !isEnd(message.to))) {
+    return false;
+  }
+  if (message.kind !== undefined && (typeof message.kind !== 'string' || !LINK_KIND_VALUES.includes(message.kind))) {
+    return false;
+  }
+  if (message.note !== undefined && (typeof message.note !== 'string' || message.note.length > 200)) {
+    return false;
+  }
+  if (action === 'saveLayout' && (!isLayout(message.positions) || (message.settings !== undefined && !isMapSettings(message.settings)))) {
+    return false;
+  }
+  return message.hours === undefined
+    || (typeof message.hours === 'number' && Number.isInteger(message.hours) && message.hours >= 1 && message.hours <= 24);
+}
+
+function isMapSettings(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.styles) || typeof value.snap !== 'boolean') {
+    return false;
+  }
+  const styles = value.styles;
+  return (LINE_SHAPES as readonly unknown[]).includes(value.shape)
+    && ['dependency', 'link', 'detected'].every((key) => (LINE_STYLES as readonly unknown[]).includes(styles[key]));
+}
+
+function isLayout(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const entries = Object.entries(value);
+  return entries.length <= MAX_LAYOUT_NODES && entries.every(([name, position]) => name.length <= 64
+    && isRecord(position)
+    && typeof position.x === 'number' && Number.isFinite(position.x)
+    && typeof position.y === 'number' && Number.isFinite(position.y));
+}
+
 function isClassifyRequest(message: unknown): message is ClassifyRequest {
   return isRecord(message)
     && message.type === 'classify'
@@ -387,13 +560,22 @@ function isMode(mode: unknown): mode is Mode {
 function isCategory(category: unknown): category is WorkCategory {
   return category === 'general'
     || category === 'bug'
+    || category === 'hotfix'
     || category === 'feature'
     || category === 'enhancement'
+    || category === 'ui'
     || category === 'refactor'
     || category === 'performance'
     || category === 'tests'
     || category === 'documentation'
     || category === 'investigation'
+    || category === 'decision'
+    || category === 'planning'
+    || category === 'workflow'
+    || category === 'security'
+    || category === 'migration'
+    || category === 'dependency'
+    || category === 'review'
     || category === 'other';
 }
 

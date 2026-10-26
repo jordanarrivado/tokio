@@ -1,8 +1,8 @@
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, rmdir, symlink } from 'node:fs/promises';
+import { cp, mkdtemp, rm, rmdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
 import { estimateTokens } from '../core/tokens';
 
@@ -80,11 +80,16 @@ export interface BenchOptions {
   buildTokioPrompt: (task: string, workspace: string) => Promise<string>;
   /** Git repository used for tasks with a verify command. Defaults to the current directory. */
   root?: string;
+  /**
+   * What verified runs start from. `head` (default) uses a git worktree at the last commit, so only committed
+   * changes count. `working-tree` copies the directory as it is, including uncommitted changes.
+   */
+  workspaceSource?: 'head' | 'working-tree';
   repeats?: number;
   timeoutMs?: number;
 }
 
-interface Workspace {
+export interface Workspace {
   path: string;
   dispose: () => Promise<void>;
 }
@@ -202,7 +207,9 @@ async function runArm(
 ): Promise<BenchRun> {
   // Each verified run starts from the same committed state, so one run's edits cannot reach the next run
   // or the user's working tree.
-  const workspace = task.verify === undefined ? null : await createWorkspace(root);
+  const workspace = task.verify === undefined
+    ? null
+    : options.workspaceSource === 'working-tree' ? await createCopyWorkspace(root) : await createWorkspace(root);
   try {
     const cwd = workspace?.path;
     const prompt = arm === 'raw' ? task.task : await options.buildTokioPrompt(task.task, cwd ?? root);
@@ -222,6 +229,42 @@ async function runArm(
   } finally {
     await workspace?.dispose();
   }
+}
+
+const COPY_EXCLUDES = new Set(['node_modules', 'out', '.git', '.tokio']);
+
+/**
+ * Copies the directory, uncommitted changes included, into a temporary folder. Build output, git metadata,
+ * the audit log and packaged extensions are skipped. Shares node_modules through a junction, as the worktree does.
+ */
+export async function createCopyWorkspace(root: string): Promise<Workspace> {
+  const holder = await mkdtemp(join(tmpdir(), 'tokio-bench-'));
+  const path = join(holder, 'run');
+  try {
+    await cp(root, path, {
+      recursive: true,
+      filter: (source) => !COPY_EXCLUDES.has(basename(source)) && !source.endsWith('.vsix')
+    });
+  } catch (error) {
+    await rm(holder, { recursive: true, force: true });
+    throw error;
+  }
+
+  const sharedModules = join(root, 'node_modules');
+  const linkedModules = existsSync(sharedModules) ? join(path, 'node_modules') : null;
+  if (linkedModules) {
+    await symlink(sharedModules, linkedModules, 'junction');
+  }
+
+  return {
+    path,
+    dispose: async () => {
+      if (linkedModules) {
+        await rmdir(linkedModules).catch(() => undefined);
+      }
+      await rm(holder, { recursive: true, force: true });
+    }
+  };
 }
 
 /** Creates a detached git worktree at HEAD. Shares the repository's node_modules through a junction when present. */

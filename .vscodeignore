@@ -6,8 +6,24 @@ out/**/*.test.js
 out/**/*.test.js.map
 out/**/*.map
 out/broker/**
+# The panel's Workspace card and the repository map read the catalog and write scope, and the map
+# scans repositories for detected links.
+!out/broker/catalog.js
+!out/broker/scope.js
+!out/broker/repos.js
+!out/broker/policy.js
+!out/broker/scan.js
 **/*.ts
 tsconfig.json
 package-lock.json
-TOKEN_SAVER_MVP_PHASED_BUILD_PROMPTS.md
+TOKIO_MVP_PHASED_BUILD_PROMPTS.md
 *.vsix
+.tokio/**
+.claude/**
+.codex/**
+.github/**
+.mcp.json
+tokio.repos.json
+.gitignore
+AGENTS.md
+SPEC.md

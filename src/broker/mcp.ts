@@ -15,6 +15,9 @@ const INSTRUCTIONS = [
   'then repo_map to find relevant files and line numbers, then read_symbol only for the bodies you need.',
   'If you already know a name, find_symbol returns its path and line without a map.',
   'read_symbol returns only changed lines on repeat reads. search_output queries truncated results.',
+  'For work across repositories, list_repositories shows each one, the write target, and the merge order;',
+  'pass repo to repo_map, read_symbol, find_symbol, or route_task to target one.',
+  'Without repo, repo_map covers the repositories the task is about; repo: "*" covers all.',
   'Secret files are blocked.'
 ].join(' ');
 
