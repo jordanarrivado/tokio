@@ -1,0 +1,3 @@
+[mcp_servers.tokio]
+command = "C:/Program Files/nodejs/node.exe"
+args = ["C:/projects/tokio/out/broker/cli.js", "mcp", "--root", "C:/projects/tokio"]

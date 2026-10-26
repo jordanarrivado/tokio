@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node D:/token-saver/out/broker/cli.js hook"
+            "command": "node C:/projects/tokio/out/broker/cli.js hook"
           }
         ]
       }
