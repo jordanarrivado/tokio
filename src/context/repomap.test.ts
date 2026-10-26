@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { estimateTokens } from '../core/tokens';
-import { buildRepoMap, extractSymbols, resolveRelativeImport, type RepoFile } from './repomap';
+import { buildRepoMap, extractSymbols, maskJsComments, resolveRelativeImport, type RepoFile } from './repomap';
 
 const files: RepoFile[] = [
   {
@@ -21,6 +21,40 @@ const files: RepoFile[] = [
     content: 'export const PAD = 2;\nexport const formatName = (name: string) => name.trim();\n'
   }
 ];
+
+test('ignores declarations inside block comments, line comments, strings and template literals', () => {
+  const source = [
+    'export function real(a: number) {',
+    '  return a;',
+    '}',
+    '/*',
+    'export function inBlockComment() {',
+    '*/',
+    'const template = `',
+    'function inTemplate() {',
+    '`;',
+    "const text = 'export function inString() {';",
+    '// export function inLineComment() {',
+    'export const handler = (x) => {',
+    '  return x;',
+    '};'
+  ].join('\n');
+  const symbols = extractSymbols(source, 'src/a.ts');
+  assert.deepEqual(symbols, [
+    { line: 1, signature: 'export function real(a: number)' },
+    { line: 12, signature: 'export const handler = (x) =>' }
+  ]);
+});
+
+test('keeps columns aligned when masking comments and strings', () => {
+  const masked = maskJsComments("const a = 'x'; /* y */ const b = `z`;\nfunction c() {}");
+  assert.equal(masked.length, 2);
+  assert.equal(masked[0].length, "const a = 'x'; /* y */ const b = `z`;".length);
+  assert.ok(!/[xyz]/.test(masked[0]), 'string and template contents are blanked');
+  assert.ok(!masked[0].includes('/*'), 'comment markers are blanked');
+  assert.ok(masked[0].includes('const b ='));
+  assert.equal(masked[1], 'function c() {}');
+});
 
 test('extracts top-level signatures with line numbers and skips plain constants', () => {
   const symbols = extractSymbols(files[3].content, files[3].path);

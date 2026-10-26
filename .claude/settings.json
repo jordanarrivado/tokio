@@ -1,8 +1,36 @@
 {
+  "permissions": {
+    "allow": [
+      "Edit",
+      "Write"
+    ],
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(.env/**)",
+      "Read(.npmrc)",
+      "Read(credential)",
+      "Read(credential.*)",
+      "Read(credential/**)",
+      "Read(credentials)",
+      "Read(credentials.*)",
+      "Read(credentials/**)",
+      "Read(secret)",
+      "Read(secret.*)",
+      "Read(secret/**)",
+      "Read(secrets)",
+      "Read(secrets.*)",
+      "Read(secrets/**)",
+      "Read(*.key)",  
+      "Read(*.pem)",
+      "Read(*.p12)",
+      "Read(*.pfx)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|Grep|Glob|Bash",
+        "matcher": "Read|Edit|Write|MultiEdit|Grep|Glob|Bash|PowerShell",
         "hooks": [
           {
             "type": "command",

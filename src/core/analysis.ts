@@ -19,6 +19,10 @@ const EXPECTED_BEHAVIOR = /\b(?:expected|should|instead|supposed|ought|want(?:ed
 const REPRODUCTION = /\b(?:error|exception|stack\s*trace|traceback|steps?|repro(?:duce|duction)?|when|after|whenever|only\s+if)\b|```|\bat\s+\S+:\d+/i;
 const ACCEPTANCE = /\b(?:should|must|so\s+that|acceptance|done\s+when|expected|when\s+the)\b/i;
 const UNCHANGED = /\b(?:without\s+changing|unchanged|preserve|keep|same\s+behavio(?:u)?r|no\s+behavio(?:u)?r\s+change)\b/i;
+const UI_STATES = /\b(?:mobile|tablet|desktop|width|px|responsive|empty|loading|error|disabled|state)\b/i;
+const ROLLBACK = /\b(?:rollback|roll\s+back|revert|down\s+migration|downtime|keep\s+(?:the\s+)?data|existing\s+data)\b/i;
+const VERSION = /\b(?:v?\d+(?:\.\d+)+|latest|next\s+major)\b/i;
+const OPTIONS = /\b(?:options?|alternatives?|versus|vs\.?|or)\b/i;
 const METRIC = /\b\d+(?:\.\d+)?\s?(?:ms|s|sec|seconds|%|mb|kb|gb|x)\b|\b(?:baseline|target|budget|under|below|at\s+most|p9[59])\b/i;
 
 export function analyzePrompt(rawPrompt: string, category: WorkCategory): PromptAnalysis {
@@ -36,7 +40,33 @@ export function analyzePrompt(rawPrompt: string, category: WorkCategory): Prompt
   }
 
   switch (category) {
+    case 'ui':
+      if (!UI_STATES.test(text)) {
+        hints.push('Name the states and widths to cover, such as empty, loading, error, and mobile.');
+      }
+      break;
+    case 'decision':
+      if (!OPTIONS.test(text)) {
+        hints.push('List the options you are weighing, or ask for them to be compared.');
+      }
+      break;
+    case 'planning':
+      if (!ACCEPTANCE.test(text)) {
+        hints.push('Add the goal and what done looks like, so the plan has checks to aim at.');
+      }
+      break;
+    case 'migration':
+      if (!ROLLBACK.test(text)) {
+        hints.push('Say whether existing data must be kept and how to roll back.');
+      }
+      break;
+    case 'dependency':
+      if (!VERSION.test(text)) {
+        hints.push('Name the target version, such as 5.2.0 or latest.');
+      }
+      break;
     case 'bug':
+    case 'hotfix':
       if (!EXPECTED_BEHAVIOR.test(text)) {
         hints.push('Add the expected behavior versus what actually happens.');
       }

@@ -35,6 +35,21 @@ test('finds secret paths referenced inside shell commands', () => {
   assert.equal(findSecretReference('npm test -- src/app.ts'), undefined);
 });
 
+test('checks only quoted strings inside heredoc bodies', () => {
+  assert.equal(findSecretReference("python - <<'EOF'\nif event.key == 'd': pass\nEOF"), undefined);
+  assert.equal(findSecretReference("python - <<'EOF'\nopen('.env').read()\nEOF"), '.env');
+  assert.equal(findSecretReference('python - <<EOF\nopen("config/server.key")\nEOF'), 'config/server.key');
+  assert.equal(findSecretReference("cat <<'EOF' > server.key\nx\nEOF"), 'server.key');
+  assert.equal(findSecretReference("python - <<'EOF'\nx = event.key\nEOF\ncat .env"), '.env');
+  assert.equal(findSecretReference('echo "<<EOF"\nevent.key'), 'event.key');
+});
+
+test('finds Windows-style secret paths that use backslashes and no dot', () => {
+  assert.equal(findSecretReference('type config\\secrets'), 'config\\secrets');
+  assert.equal(findSecretReference('Get-Content config\\credentials'), 'config\\credentials');
+  assert.equal(findSecretReference('cat secrets\\db'), 'secrets\\db');
+});
+
 test('resolves safe repository paths and blocks secrets, traversal, and unsupported files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'tokio-policy-'));
   await mkdir(join(root, 'src'), { recursive: true });

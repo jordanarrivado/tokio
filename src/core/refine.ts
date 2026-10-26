@@ -9,13 +9,22 @@ const MAX_VALIDATION_COMMANDS = 3;
 const CATEGORY_LABELS: Record<WorkCategory, string> = {
   general: 'General',
   bug: 'Bug Fix',
+  hotfix: 'Production Hotfix',
   feature: 'Feature',
   enhancement: 'Enhancement',
+  ui: 'UI Work',
   refactor: 'Refactor',
   performance: 'Performance',
   tests: 'Tests',
   documentation: 'Documentation',
   investigation: 'Investigation',
+  decision: 'Decision',
+  planning: 'Planning',
+  workflow: 'Workflow / Automation',
+  security: 'Security',
+  migration: 'Migration',
+  dependency: 'Dependency Upgrade',
+  review: 'Code Review',
   other: 'Other'
 };
 
@@ -51,6 +60,52 @@ const CATEGORY_INSTRUCTIONS: Record<WorkCategory, readonly string[]> = {
     'Report likely causes with supporting evidence and paths.',
     'Do not modify code unless implementation is explicitly requested.'
   ],
+  hotfix: [
+    'Find the root cause with evidence (a log line, query, or code path) before changing anything; do not guess.',
+    'Reproduce it with a failing test, then make the smallest change that passes it.',
+    'Change nothing beyond the fix; list follow-up cleanup and review for after production is stable.'
+  ],
+  ui: [
+    'Reuse the existing design tokens and components; add no new colors, spacing values, or UI libraries.',
+    'Follow the layout and interaction patterns of an existing screen.',
+    'Check the result at about 360, 768, and 1280 px wide, and keep labels, focus states, and keyboard access working.'
+  ],
+  decision: [
+    'Do not write code. Read the affected code first and list every place the decision touches, with paths.',
+    'Compare at least two options with their trade-offs and recommend one.',
+    'Record the decision: what was chosen, what was rejected, and why.'
+  ],
+  planning: [
+    'Read the relevant code first; do not guess about files you have not opened.',
+    'List the steps, the files each step touches, and one check per acceptance criterion.',
+    'Call out open questions and risks, each with a recommended answer.',
+    'Stop after the plan and wait for approval before changing code.'
+  ],
+  workflow: [
+    'Follow the existing pipeline, script, and job conventions; reuse current steps where possible.',
+    'Keep secrets in the platform secret store; never hard-code or print them.',
+    'Show how to run or dry-run the change locally, and say what still needs a real run to confirm.'
+  ],
+  security: [
+    'Name the threat being prevented and check every entry point that reaches the affected code.',
+    'Never log, print, or commit secrets or personal data.',
+    'Add a test that shows unsafe input is rejected, not only that safe input works.'
+  ],
+  migration: [
+    'Make the change reversible: include a rollback or down step.',
+    'Keep existing data and the currently deployed code working while the change rolls out.',
+    'Test on a copy with invented data, and report what the change locks and how long it may take.'
+  ],
+  dependency: [
+    'Read the release notes for breaking changes between the current and target versions.',
+    'Upgrade one package at a time and change only the code its breaking changes require.',
+    'Run the full test suite and build, and report any deprecation warnings that remain.'
+  ],
+  review: [
+    'Do not change code; report findings with file and line.',
+    'Rank findings by severity; focus on correctness, security, and missing tests before style.',
+    'Say what was not reviewed or could not be checked.'
+  ],
   other: []
 };
 
@@ -64,6 +119,15 @@ const COMPACT_CATEGORY_GUIDANCE: Record<WorkCategory, string | undefined> = {
   tests: 'Prefer deterministic test-only changes unless production code must change.',
   documentation: 'Verify examples; do not change runtime behavior.',
   investigation: 'Report evidence and likely causes; do not modify code unless asked.',
+  hotfix: 'Root cause with evidence first; failing test; smallest fix; defer cleanup.',
+  ui: 'Reuse existing tokens and components; check 360/768/1280 px and keyboard access.',
+  decision: 'No code; list affected paths; compare options; record chosen, rejected, and why.',
+  planning: 'Read first; steps, files, and one check per criterion; stop for approval before code.',
+  workflow: 'Follow existing pipeline conventions; no hard-coded secrets; show a local dry run.',
+  security: 'Name the threat; cover every entry point; no secrets in logs; test unsafe input.',
+  migration: 'Reversible with rollback; keep old code working; test on invented data.',
+  dependency: 'Check breaking changes; one package at a time; full tests and build.',
+  review: 'No edits; findings with file:line ranked by severity; correctness before style.',
   other: undefined
 };
 
@@ -129,9 +193,14 @@ export function refinePrompt(input: RefineInput): RefineOutput {
     sections.push({ generic: categorySection.text, tag: 'work_type', title: 'Work type', body: categorySection.body });
   }
 
-  const secondary = formatSecondaryCategory(input.secondaryCategory, category);
-  if (secondary) {
-    sections.push({ generic: secondary, tag: 'also', title: 'Also', body: secondary.replace(/^Also: /, '') });
+  const additional = formatAdditionalCategories(input.additionalCategories, category);
+  if (additional.length > 0) {
+    sections.push({
+      generic: additional.map((line) => `Also: ${line}`).join('\n'),
+      tag: 'also',
+      title: 'Also',
+      body: additional.join('\n')
+    });
   }
 
   const acceptanceCriteria = input.acceptanceCriteria?.trim();
@@ -199,17 +268,16 @@ function formatCategory(
   };
 }
 
-function formatSecondaryCategory(
-  secondary: WorkCategory | undefined,
+function formatAdditionalCategories(
+  additional: readonly WorkCategory[] | undefined,
   primary: WorkCategory
-): string | undefined {
-  if (!secondary || secondary === primary || secondary === 'general' || secondary === 'other') {
-    return undefined;
-  }
-  const guidance = COMPACT_CATEGORY_GUIDANCE[secondary];
-  return guidance
-    ? `Also: ${CATEGORY_LABELS[secondary]} — ${guidance}`
-    : `Also: ${CATEGORY_LABELS[secondary]}`;
+): string[] {
+  const unique = [...new Set(additional ?? [])]
+    .filter((category) => category !== primary && category !== 'general' && category !== 'other');
+  return unique.map((category) => {
+    const guidance = COMPACT_CATEGORY_GUIDANCE[category];
+    return guidance ? `${CATEGORY_LABELS[category]} — ${guidance}` : CATEGORY_LABELS[category];
+  });
 }
 
 function formatRepositoryContext(

@@ -5,13 +5,22 @@ export type PromptTarget = 'generic' | 'claude' | 'codex';
 export type WorkCategory =
   | 'general'
   | 'bug'
+  | 'hotfix'
   | 'feature'
   | 'enhancement'
+  | 'ui'
   | 'refactor'
   | 'performance'
   | 'tests'
   | 'documentation'
   | 'investigation'
+  | 'decision'
+  | 'planning'
+  | 'workflow'
+  | 'security'
+  | 'migration'
+  | 'dependency'
+  | 'review'
   | 'other';
 
 export interface RepositoryContext {
@@ -38,7 +47,8 @@ export interface RefineInput {
   category?: WorkCategory;
   outputStyle?: OutputStyle;
   target?: PromptTarget;
-  secondaryCategory?: WorkCategory;
+  /** Other kinds of work in the same task; each adds one short guidance line. */
+  additionalCategories?: WorkCategory[];
   acceptanceCriteria?: string;
   repositoryContext?: RepositoryContext;
 }

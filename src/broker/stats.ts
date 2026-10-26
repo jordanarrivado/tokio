@@ -25,6 +25,13 @@ export interface SessionStats {
   savedTokens: number;
   redactions: number;
   byTool: Record<string, ToolStats>;
+  byRepo: Record<string, RepoStats>;
+}
+
+export interface RepoStats {
+  calls: number;
+  /** Calls into this repository that the hook blocked, such as edits outside the write scope. */
+  blocked: number;
 }
 
 export async function readAuditEntries(root: string): Promise<StoredAuditEntry[]> {
@@ -63,7 +70,8 @@ export function summarizeAudit(entries: readonly StoredAuditEntry[]): SessionSta
     baselineTokens: 0,
     savedTokens: 0,
     redactions: 0,
-    byTool: {}
+    byTool: {},
+    byRepo: {}
   };
 
   for (const entry of entries) {
@@ -82,6 +90,13 @@ export function summarizeAudit(entries: readonly StoredAuditEntry[]): SessionSta
       tool.savedTokens += entry.savedTokens;
     }
     stats.byTool[entry.tool] = tool;
+
+    for (const name of Array.isArray(entry.repos) ? entry.repos : []) {
+      const repo = stats.byRepo[name] ?? { calls: 0, blocked: 0 };
+      repo.calls += 1;
+      repo.blocked += entry.blocked ? 1 : 0;
+      stats.byRepo[name] = repo;
+    }
   }
   return stats;
 }
@@ -90,6 +105,9 @@ export function formatStats(stats: SessionStats, scope: string): string {
   const toolRows = Object.entries(stats.byTool)
     .sort(([, left], [, right]) => right.calls - left.calls)
     .map(([tool, value]) => `    ${tool.padEnd(14)} calls ${value.calls}, net ${formatSigned(value.savedTokens)}`);
+  const repoRows = Object.entries(stats.byRepo)
+    .sort(([leftName, left], [rightName, right]) => right.calls - left.calls || leftName.localeCompare(rightName))
+    .map(([repo, value]) => `    ${repo.padEnd(14)} calls ${value.calls} (blocked ${value.blocked})`);
 
   return [
     `Tokio usage, ${scope} (estimates: characters ÷ 4)`,
@@ -98,7 +116,9 @@ export function formatStats(stats: SessionStats, scope: string): string {
     `  baseline (full-file or full-text alternative): ~${formatTokens(stats.baselineTokens)}`,
     `  estimated net saved: ${formatSigned(stats.savedTokens)}`,
     `  redacted values: ${stats.redactions}`,
-    ...(toolRows.length > 0 ? ['  by tool:', ...toolRows] : [])
+    ...(toolRows.length > 0 ? ['  by tool:', ...toolRows] : []),
+    // One repository needs no breakdown: every call is in it.
+    ...(repoRows.length > 1 ? ['  by repo:', ...repoRows] : [])
   ].join('\n');
 }
 
@@ -117,7 +137,7 @@ function formatSigned(value: number): string {
   return `${value < 0 ? '-' : ''}~${formatTokens(Math.abs(value))}`;
 }
 
-function isStoredEntry(value: unknown): value is StoredAuditEntry {
+export function isStoredEntry(value: unknown): value is StoredAuditEntry {
   if (typeof value !== 'object' || value === null) {
     return false;
   }

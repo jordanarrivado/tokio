@@ -1,6 +1,6 @@
-# Token Saver — Phased MVP Build Prompts
+# Tokio — Phased MVP Build Prompts
 
-> **Historical document.** This playbook was written under the project's original name, *Token Saver*. The extension has since been renamed **Tokio** (identifier `local.tokio`). Names, paths, and commands below reflect the original build and may differ from the current code; see [README.md](README.md) for current behavior.
+> **Historical document.** This playbook describes the original MVP build of **Tokio** (identifier `local.tokio`). Some paths and commands below reflect that build and may differ from the current code; see [README.md](README.md) for current behavior.
 
 A copy-ready implementation playbook for **Codex or Claude Code in VS Code**.
 
@@ -8,7 +8,7 @@ A copy-ready implementation playbook for **Codex or Claude Code in VS Code**.
 
 Build a VS Code extension that takes a raw coding request and returns a concise, scoped, implementation-ready prompt. In V1 it is **local and rule-based**: no AI provider, no network access, and no automatic submission to other coding agents. Users can preview, edit, and copy the refined prompt.
 
-**Primary flow:** Open Token Saver → paste raw prompt → choose Minimal / Adaptive / Strict → Refine → review/edit result → Copy → paste into Codex or Claude Code.
+**Primary flow:** Open Tokio → paste raw prompt → choose Minimal / Adaptive / Strict → Refine → review/edit result → Copy → paste into Codex or Claude Code.
 
 **Success criteria:** working extension in an Extension Development Host; deterministic unit tests; no network dependencies; empty-input and error handling; easy clipboard copy; original requirements retained verbatim in the refined prompt when semantic rewriting is unavailable.
 
@@ -40,7 +40,7 @@ Build a VS Code extension that takes a raw coding request and returns a concise,
 ## Suggested repository tree
 
 ```text
-token-saver/
+tokio/
 ├── src/
 │   ├── core/
 │   │   ├── types.ts
@@ -67,7 +67,7 @@ Paths are suggestions; adapt to the scaffold you create without introducing unne
 ### Copy-ready prompt
 
 ```text
-You are helping me build "Token Saver", a token-efficient coding prompt refiner for use alongside Codex and Claude Code in VS Code.
+You are helping me build "Tokio", a token-efficient coding prompt refiner for use alongside Codex and Claude Code in VS Code.
 
 V1 scope:
 - Standalone VS Code extension with an Activity Bar webview.
@@ -90,12 +90,12 @@ First, inspect only any existing manifest/README or relevant scaffold files. Do 
 ### Copy-ready prompt
 
 ```text
-Implement Phase 1 ONLY of Token Saver.
+Implement Phase 1 ONLY of Tokio.
 
 Create a minimal TypeScript VS Code extension scaffold:
 - package.json with correct VS Code engine, activation, command, Activity Bar view container and webview view contributions.
 - TypeScript compilation and basic build/check scripts.
-- src/extension.ts registering a WebviewViewProvider and a command to focus the Token Saver view.
+- src/extension.ts registering a WebviewViewProvider and a command to focus the Tokio view.
 - A minimal placeholder webview with CSP and no external scripts/resources.
 - README with instructions to run the Extension Development Host (F5).
 
@@ -104,7 +104,7 @@ Constraints: use built-in VS Code APIs; keep dependencies minimal; no refinement
 Validate compilation and that the extension can activate where testable. Return a concise file/change summary and exact manual F5 check. Stop after Phase 1.
 ```
 
-**Gate:** F5 opens an Extension Development Host; Activity Bar shows Token Saver; panel renders without CSP errors.
+**Gate:** F5 opens an Extension Development Host; Activity Bar shows Tokio; panel renders without CSP errors.
 
 ---
 
@@ -115,7 +115,7 @@ Validate compilation and that the extension can activate where testable. Return 
 ### Copy-ready prompt
 
 ```text
-Implement Phase 2 ONLY of Token Saver. Do not modify the webview beyond what's required for compilation.
+Implement Phase 2 ONLY of Tokio. Do not modify the webview beyond what's required for compilation.
 
 Create pure TypeScript refinement logic under src/core/ with:
 - Types: Mode = 'minimal' | 'adaptive' | 'strict'; input = { rawPrompt: string; targetPath?: string; mode?: Mode }; output includes refinedPrompt and mode.
@@ -143,7 +143,7 @@ Run tests and TypeScript checks. Report only changed files, results and caveats.
 ### Copy-ready prompt
 
 ```text
-Implement Phase 3 ONLY of Token Saver.
+Implement Phase 3 ONLY of Tokio.
 
 Replace the placeholder webview with a compact, accessible VS Code-native-looking interface containing:
 - Multiline Raw Prompt input.
@@ -170,7 +170,7 @@ Run focused checks and provide a short manual test script. Stop after Phase 3.
 ### Copy-ready prompt
 
 ```text
-Implement Phase 4 ONLY of Token Saver.
+Implement Phase 4 ONLY of Tokio.
 
 Add to the existing webview:
 - Copy Refined Prompt button that copies the CURRENT edited output (not a stale generated value).
@@ -195,7 +195,7 @@ Run targeted checks. Manually test copy → paste in an editor, copying after ou
 ### Copy-ready prompt
 
 ```text
-Implement Phase 5 ONLY of Token Saver: reliability and regression checks.
+Implement Phase 5 ONLY of Tokio: reliability and regression checks.
 
 Review the actual changed code, then add or improve focused tests for:
 - Every refinement mode and optional-path behavior.
@@ -219,7 +219,7 @@ Fix only defects found in scope. Run type checks, unit tests and build. Provide 
 ### Copy-ready prompt
 
 ```text
-Implement Phase 6 ONLY of Token Saver.
+Implement Phase 6 ONLY of Tokio.
 
 Finish the VS Code extension MVP:
 - README: prerequisites, install, F5 development workflow, local usage, each mode, limitations, and how to copy into Codex/Claude Code.
@@ -244,7 +244,7 @@ Run build/tests and report exact outcomes, generated artifact path only if it ex
 ### Copy-ready prompt
 
 ```text
-Plan and implement an OPTIONAL, LOCAL benchmark harness for Token Saver; do not change refinement behavior.
+Plan and implement an OPTIONAL, LOCAL benchmark harness for Tokio; do not change refinement behavior.
 
 Prepare 15–20 representative prompts (UI tweaks, bug reports, features, refactors) with expected requirements. Evaluate raw vs refined prompt on:
 - Requirement preservation and clarity (manual or documented rubric).
@@ -268,7 +268,7 @@ Do not fabricate usage figures or promise token savings. Make benchmark repeatab
 
 ## How to use this guide
 
-1. Open your `token-saver` workspace in VS Code.
+1. Open your `tokio` workspace in VS Code.
 2. Give Codex or Claude Code the **Operating rules for all phases** once, preferably in a short `AGENTS.md` or `CLAUDE.md`.
 3. Paste the **Phase 0** prompt and review the plan.
 4. Paste each subsequent phase prompt individually. Verify the stated gate before proceeding.

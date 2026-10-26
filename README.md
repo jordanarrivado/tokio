@@ -95,20 +95,46 @@ All modes retain the trimmed original task text. The engine adds deterministic i
 
 ## Work categories
 
-Auto Detect is the default. It uses local deterministic phrase scoring and displays the suggested category, confidence, and matched signals while you type. Low-confidence or ambiguous input falls back to General. Selecting a category manually pauses automatic selection until Auto Detect is selected again.
+Auto Detect is the default. It runs locally, using deterministic phrase scoring, when you press **Refine Prompt**: it writes the `Type:` and `Also:` lines into the refined prompt for you, then shows the main category, its confidence and matched signals, plus a `+` badge for each other kind of work it found. You never type these lines yourself. While you type, only the prompt-clarity hints update. Editing the raw prompt resets the badges until the next refine. Input with no clear signal falls back to General. Selecting a category manually turns off detection, including the extra lines, until Auto Detect is selected again.
 
-| Category | Added guidance |
-| --- | --- |
-| General | Adds no category assumptions. |
-| Bug Fix | Confirms root cause, requests the smallest safe fix, and adds regression validation. |
-| Feature | Limits implementation to the requested behavior and its focused validation. |
-| Enhancement | Preserves compatibility around the requested workflow improvement. |
-| Refactor | Preserves observable behavior and prevents unrelated feature work. |
-| Performance | Requires a baseline, measurement, and evidence for improvement claims. |
-| Tests | Prefers deterministic test-only changes unless production code must be fixed. |
-| Documentation | Verifies examples and avoids runtime changes. |
-| Investigation | Collects evidence without modifying code unless implementation was requested. |
-| Other | Records the work type without adding assumptions. |
+### Several kinds of work in one prompt
+
+A prompt can mix work, such as "the checkout is broken after payment; add tests and check it for XSS". Auto Detect picks the strongest category as the main type and adds up to three more that are clearly present. Each extra category adds one short `Also:` line to the refined prompt:
+
+```
+Type: Security — Name the threat; cover every entry point; no secrets in logs; test unsafe input.
+
+Also: Bug Fix — Confirm root cause; add regression coverage.
+Also: Tests — Prefer deterministic test-only changes unless production code must change.
+```
+
+Ties go to the more urgent or risk-bearing work: hotfix, then security, bug, migration, and so on.
+
+### Categories
+
+The panel groups categories as Plan, Build, Fix, Maintain, and Support.
+
+| Group | Category | Added guidance |
+| --- | --- | --- |
+| | General | Adds no category assumptions. |
+| Plan | Planning | Reads the code first, lists steps, files, and one check per acceptance criterion, then stops for approval before any code. |
+| Plan | Decision | Writes no code: maps affected paths, compares options, and records what was chosen, what was rejected, and why. |
+| Plan | Investigation | Collects evidence without modifying code unless implementation was requested. |
+| Build | Feature | Limits implementation to the requested behavior and its focused validation. |
+| Build | Enhancement | Preserves compatibility around the requested workflow improvement. |
+| Build | UI Work | Reuses existing design tokens and components and checks the screen at about 360, 768, and 1280 px with keyboard access intact. |
+| Build | Refactor | Preserves observable behavior and prevents unrelated feature work. |
+| Build | Performance | Requires a baseline, measurement, and evidence for improvement claims. |
+| Build | Migration | Requires a rollback step, keeps the deployed code working during rollout, and tests on invented data. |
+| Fix | Bug Fix | Confirms root cause, requests the smallest safe fix, and adds regression validation. |
+| Fix | Production Hotfix | Requires an evidence-backed root cause, a failing test, and the smallest fix; defers cleanup until production is stable. |
+| Fix | Security | Names the threat, checks every entry point, keeps secrets out of logs, and tests that unsafe input is rejected. |
+| Maintain | Dependency Upgrade | Checks release notes for breaking changes, upgrades one package at a time, and runs the full tests and build. |
+| Maintain | Workflow / Automation | Follows existing CI, script, and job conventions, keeps secrets in the secret store, and shows a local dry run. |
+| Support | Tests | Prefers deterministic test-only changes unless production code must be fixed. |
+| Support | Documentation | Verifies examples and avoids runtime changes. |
+| Support | Code Review | Makes no edits; reports findings with file and line, ranked by severity, correctness before style. |
+| | Other | Records the work type without adding assumptions. |
 
 Automatic classification is a suggestion, not semantic understanding. The category is deterministically checked again when Refine is submitted, preventing a pending UI update from using a stale suggestion.
 
@@ -162,7 +188,7 @@ The broker is a local CLI with no runtime dependencies. It is separate from the 
 From the project root, run:
 
 ```powershell
-node D:/token-saver/out/broker/cli.js init
+node D:/tokio/out/broker/cli.js init
 ```
 
 `tokio init` configures both agents in one step, using the path of the CLI it runs from:
@@ -179,16 +205,80 @@ The manual steps below show what `init` writes. Use them only if you prefer to e
 | Command | Purpose |
 | --- | --- |
 | `tokio mcp [--root <dir>]` | Serves the tools below over MCP (stdio). |
-| `tokio hook` | `PreToolUse` hook. Reads the event on stdin, exits `2` to block secret access. |
+| `tokio hook` | `PreToolUse` hook. Reads the event on stdin, exits `2` to block secret access or an edit outside the write scope. |
+| `tokio scope [<repo>...] [--hours <n>] [--clear] [--root <dir>]` | Shows or grants write on catalog repositories. Run it yourself, not through the agent. |
 | `tokio map "<task>" [--root <dir>] [--target <path>] [--budget <tokens>]` | Prints the ranked repository map for a task. |
+| `tokio doctor [--root <dir>]` | Read-only check of the project's Tokio setup. Reports missing or misplaced config, such as a permissions rule nested inside a hook. Exits 1 on failures. |
 | `tokio bench <tasks.json> [--repeat <n>] [--out <report.json>]` | Compares raw and Tokio prompts through `claude -p`. |
 
 MCP tools:
 
 - `refine_task` redacts credential-shaped values, then applies Tokio's deterministic refinement.
-- `repo_map` returns files ranked by task terms, import relationships (JS/TS, Python, Go, Rust), and co-change history from git when available, with top-level signatures and line numbers, within a token budget.
+- `repo_map` returns files ranked by task terms, import relationships (JS/TS, Python, Go, Rust, and PHP through `composer.json` PSR-4), and co-change history from git when available, with top-level signatures and line numbers, within a token budget. PHP methods are listed inside their classes.
 - `read_symbol` returns a body by line. Repeat reads of the same range return only changed lines, unless `full: true` is passed. Bodies over 200 lines are truncated and stored.
 - `search_output` searches the stored remainder of a truncated read.
+- `list_repositories` lists the repositories in `tokio.repos.json`: name, path, purpose, which one is the write target, and the merge order. Without the file, it lists the root alone.
+
+### Several local repositories
+
+Put a `tokio.repos.json` in the root that `tokio mcp --root` serves, and commit it. Relative paths resolve against that root, so the file works for anyone who clones the repositories side by side.
+
+```json
+{
+  "default": "frontend",
+  "repos": [
+    { "name": "frontend", "path": ".", "purpose": "React UI", "dependsOn": ["shared", "backend"] },
+    { "name": "backend", "path": "../backend", "purpose": "REST API", "dependsOn": ["shared"] },
+    { "name": "shared", "path": "../shared", "purpose": "Shared types" }
+  ]
+}
+```
+
+`default` is the write target. The other repositories are references. `dependsOn` sets the merge order: dependencies merge first. Commit each repository on its own, using the same branch name in every repository a feature touches.
+
+With more than one repository:
+
+- `repo_map`, `read_symbol`, `find_symbol`, and `route_task` take an optional `repo`. Without it, `repo_map`, `find_symbol`, and `route_task` cover every repository, and `read_symbol` reads from the default one. `path` and `targetPath` are relative to the chosen repository, or to the default one.
+- Output paths carry their repository, such as `[backend] src/api/upload.ts`.
+- An import of a package that another repository publishes links the two files in the map. The package can be a `package.json` name, a `go.mod` module, or a top-level Python package. So the files behind an API contract or a shared type rank together.
+- `route_task` names the write target and the read-only repositories with relevant files, and warns when most relevant files are in a read-only one.
+- An invalid catalog makes these tools and `list_repositories` return an error that names the problem.
+
+The `tokio hook` PreToolUse hook blocks Edit, Write, MultiEdit, and NotebookEdit in any catalog repository except the default one. When a task needs another repository, run this in your own terminal:
+
+```powershell
+node D:/tokio/out/broker/cli.js scope backend              # write on backend for 4 hours
+node D:/tokio/out/broker/cli.js scope backend --hours 8    # 1 to 24 hours
+node D:/tokio/out/broker/cli.js scope                      # show the current scope
+node D:/tokio/out/broker/cli.js scope --clear              # back to the default only
+```
+
+The Tokio panel in VS Code does the same from its **Repositories** card. It reads `tokio.repos.json` in the first workspace folder. It lists each repository with its access: write target, read-only, edits allowed until a time, or missing. Each repository has buttons to allow or revoke edits, make it the write target, or remove it, and the card can add a repository with a folder picker. Removing asks first and never touches the repository's files. Edits to the catalog are checked before saving, so the panel cannot write an invalid file. The card needs a trusted, local workspace.
+
+**Repository map.** Open it with **⤢ Open Map** on the Workspace card or the command **Tokio: Open Repository Map**. Repositories are nodes on a board:
+
+- Drag a node to arrange it. Positions are saved per user in `.tokio/layout.json`.
+- Zoom with Ctrl + wheel, a trackpad pinch, `+` and `-`, or the − / 100% / + controls (25%–200%). Pan by dragging empty space, with the middle button, holding Space while dragging, or the wheel. **Fit** or `F` frames every repository, `0` resets to 100%, and `Esc` clears the selection.
+- **Lines** sets the connector shape (curved, straight, or step), a style for each kind (solid, dashed, dotted, or long dash), and grid snapping. These save with the layout.
+- Drag a node's ● port onto another node to record a dependency (`dependsOn`).
+- Click a connection to see its dependency, file links, and detected imports. Remove any of them, or pin a detected import as a link.
+- **+** adds a repository or a file link. A file link pins a contract that imports cannot reveal, such as an API route and the code that calls it:
+
+```json
+"links": [
+  { "from": "frontend:src/api/upload.ts", "to": "backend:routes/api.php", "kind": "api", "note": "POST /users/{id}/avatar" }
+]
+```
+
+Each repository scans up to 500 files. A large one can raise its own cap, up to 5000, with `"maxFiles": 2500` in its catalog entry. Laravel's generated `storage/framework`, `storage/logs`, and `bootstrap/cache` are skipped.
+
+`kind` is one of `api`, `type`, `event`, `schema`, `config`, or `other`. Links live in `tokio.repos.json`, so the team and the agent share them: `repo_map` ranks both ends of a link together, and its automatic repository pick brings in the repository on the other end.
+
+Grants live in `.tokio/scope.json`, and `tokio init` adds it and `.tokio/layout.json` to `.gitignore`. The hook refuses any agent attempt to run `tokio scope` or to write that file, so only you can widen the scope. An invalid catalog blocks edits until it is fixed.
+
+With several repositories, `tokio init` adds the commit rules to the AGENTS.md block, the audit log records which repositories each call used, `tokio stats` shows calls per repository, and `tokio doctor` checks each catalog path.
+
+Read-only scope is a guard, not a sandbox. The hook sees file-edit tools and the text of shell commands, but not what a script writes once it runs. Review diffs in read-only repositories as usual.
 
 Register the server in the project's `.mcp.json`, replacing the path with your checkout:
 
@@ -197,7 +287,7 @@ Register the server in the project's `.mcp.json`, replacing the path with your c
   "mcpServers": {
     "tokio": {
       "command": "node",
-      "args": ["D:/token-saver/out/broker/cli.js", "mcp", "--root", "D:/your-project"]
+      "args": ["D:/tokio/out/broker/cli.js", "mcp", "--root", "D:/your-project"]
     }
   }
 }
@@ -211,7 +301,7 @@ Block secret access with a hook in the project's `.claude/settings.json`:
     "PreToolUse": [
       {
         "matcher": "Read|Edit|Write|MultiEdit|Grep|Glob|Bash",
-        "hooks": [{ "type": "command", "command": "node D:/token-saver/out/broker/cli.js hook" }]
+        "hooks": [{ "type": "command", "command": "node D:/tokio/out/broker/cli.js hook" }]
       }
     ]
   }
@@ -229,7 +319,7 @@ Register it in the project's `.claude/settings.json`, next to the PreToolUse hoo
   "hooks": {
     "UserPromptSubmit": [
       {
-        "hooks": [{ "type": "command", "command": "node D:/token-saver/out/broker/cli.js prompt-hook" }]
+        "hooks": [{ "type": "command", "command": "node D:/tokio/out/broker/cli.js prompt-hook" }]
       }
     ]
   }
@@ -238,7 +328,7 @@ Register it in the project's `.claude/settings.json`, next to the PreToolUse hoo
 
 The hook fails open. Any error, such as a missing repository or malformed input, adds nothing and never blocks the prompt. Claude Code allows 30 seconds for this hook and caps the injected context at 10,000 characters. Injection costs tokens on every matching prompt, even when the agent would not have needed the map. Whether it saves tokens overall depends on the task, so measure it with `tokio bench` before relying on it.
 
-Secret paths (`.env`, credential files, keys) are blocked in file fields and in Bash command tokens. Unparseable hook input is blocked. The hook does not parse arbitrary shell, so broad searches such as `grep -r` can still read secret files. As a second layer, `tokio init` adds `Read(...)` deny rules for the same file patterns to `permissions.deny` in `.claude/settings.json`. Claude Code applies a `Read` deny to Read, Grep, Glob, and Edit/Write on the same path, and it enforces the rule even when a hook allows the call. Deny rules match Bash command text, not what a program reads, so they do not stop `grep -r` or `cat` run through Bash. The hook is the only Bash-side check. Use a sandbox if Bash reads must be fully blocked.
+Secret paths (`.env`, credential files, keys) are blocked in file fields and in Bash command tokens. Unparseable hook input is blocked. The hook blocks Bash commands that read whole trees: recursive `grep` (`-r`, `-R`, `--recursive`), `find -exec`, and `xargs` feeding a reader such as `cat`. The agent is asked to name files explicitly. It still does not parse arbitrary shell, so quoted or nested commands, shell globs such as `cat *`, and `$(find ...)` can still read secret files. As a second layer, `tokio init` adds `Read(...)` deny rules for the same file patterns to `permissions.deny` in `.claude/settings.json`. Claude Code applies a `Read` deny to Read, Grep, Glob, and Edit/Write on the same path, and it enforces the rule even when a hook allows the call. Deny rules match Bash command text, not what a program reads, so they do not stop `grep -r` or `cat` run through Bash. The hook is the only Bash-side check. Use a sandbox if Bash reads must be fully blocked.
 
 Every broker call and every hook block appends one line to `.tokio/audit.log`. The log records tool name, estimated tokens, file paths, and redaction kinds. It never records file contents or prompt text. The `*.log` pattern in `.gitignore` keeps it out of version control.
 
@@ -274,11 +364,11 @@ The VSIX packaging tool is not a project dependency. Use `npx` to fetch the offi
 npx.cmd @vscode/vsce package --allow-missing-repository
 ```
 
-This produces `tokio-0.5.2.vsix` for the current version. Install it with:
+This produces `tokio-<version>.vsix` for the version in `package.json` (0.6.0 at the time of writing). Install it with:
 
 ```powershell
 code --uninstall-extension local.token-saver
-code --install-extension .\tokio-0.5.2.vsix --force
+code --install-extension .\tokio-0.6.0.vsix --force
 ```
 
 Version 0.5 renamed the extension identifier from `local.token-saver` to `local.tokio`. The uninstall command above only needs to run once, to avoid duplicate Activity Bar entries.
@@ -290,7 +380,8 @@ The `vscode:prepublish` hook runs a clean build, and `.vscodeignore` keeps sourc
 - Open the Activity Bar view and confirm there are no CSP or runtime errors in Developer Tools.
 - Refine blank, multiline, Unicode, special-character, and long prompts.
 - Test Minimal, Adaptive, and Strict modes, with and without a target path.
-- Test Auto Detect and every manual category; verify ambiguous prompts fall back to General.
+- Test Auto Detect and every manual category; verify prompts with no clear signal fall back to General.
+- Paste a prompt that mixes work (for example a bug, tests, and a migration); press Refine Prompt and confirm the `+` badges appear and each adds an `Also:` line.
 - Compare Compact and Detailed output and verify the displayed estimates update after editing either prompt.
 - Test None, Targeted, and Architecture context; inspect and deselect suggested files.
 - Confirm context scanning is rejected in an untrusted workspace.

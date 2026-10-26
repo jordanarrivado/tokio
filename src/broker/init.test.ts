@@ -48,7 +48,7 @@ test('creates the Claude Code and Codex configs and the guidance block in an emp
   assert.deepEqual(mcp.mcpServers.tokio, { command: 'node', args: [cli, 'mcp', '--root', toPosixPath(resolve(root))] });
 
   const settings = await readJson(join(root, '.claude', 'settings.json'));
-  assert.equal(settings.hooks.PreToolUse[0].matcher, 'Read|Edit|Write|MultiEdit|Grep|Glob|Bash');
+  assert.equal(settings.hooks.PreToolUse[0].matcher, 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell');
   assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, `node ${cli} hook`);
   assert.equal(settings.hooks.UserPromptSubmit[0].hooks[0].command, `node ${cli} prompt-hook`);
   assert.ok(settings.permissions.deny.includes('Read(.env)'));
@@ -174,6 +174,25 @@ test('reports differing tokio entries as conflicts and replaces them only with f
   assert.equal((await readJson(join(root, '.mcp.json'))).mcpServers.tokio.args[0], cli);
   assert.equal((await readJson(join(root, '.claude', 'settings.json'))).hooks.PreToolUse[0].hooks[0].command, `node ${cli} hook`);
   assert.ok((await readFile(join(root, '.codex', 'config.toml'), 'utf8')).includes(`"${cli}"`));
+});
+
+test('widens a tokio hook matcher that misses tools, only with force', async () => {
+  const root = await scratchDirectory();
+  const cli = toPosixPath(resolve(fakeCli(root)));
+  const oldMatcher = 'Read|Edit|Write|MultiEdit|Grep|Glob|Bash';
+  await mkdir(join(root, '.claude'), { recursive: true });
+  await writeFile(join(root, '.claude', 'settings.json'), JSON.stringify({
+    hooks: { PreToolUse: [{ matcher: oldMatcher, hooks: [{ type: 'command', command: `node ${cli} hook` }] }] }
+  }), 'utf8');
+
+  const kept = await initProject({ root, cliPath: fakeCli(root) });
+  const keptSettings = kept.find((result) => result.path === '.claude/settings.json');
+  assert.equal(keptSettings?.status, 'conflict');
+  assert.match(keptSettings?.detail ?? '', /PowerShell/);
+  assert.equal((await readJson(join(root, '.claude', 'settings.json'))).hooks.PreToolUse[0].matcher, oldMatcher);
+
+  await initProject({ root, cliPath: fakeCli(root), force: true });
+  assert.equal((await readJson(join(root, '.claude', 'settings.json'))).hooks.PreToolUse[0].matcher, `${oldMatcher}|NotebookEdit|PowerShell`);
 });
 
 test('leaves invalid JSON untouched and still configures the other files', async () => {

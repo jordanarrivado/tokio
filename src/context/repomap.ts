@@ -25,6 +25,15 @@ export interface RepoMapOptions {
   maxSymbolsPerFile?: number;
   /** Files that often change together (see history.ts). Each link adds a ranking edge between two files. */
   coChange?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * Import edges built by the caller, used instead of reading imports from the files. Needed when paths
+   * carry a repository prefix, because Python and Go imports resolve from each repository's own root.
+   */
+  edges?: ReadonlyMap<string, string[]>;
+  /** Paths with this prefix rank first among files with the same score. */
+  preferPrefix?: string;
+  /** How a path is shown in the map. Defaults to the path itself. */
+  formatPath?: (path: string) => string;
 }
 
 export interface RepoMap {
@@ -56,20 +65,31 @@ const SYMBOL_RULES: readonly { extensions: readonly string[]; pattern: RegExp }[
   },
   { extensions: ['.py'], pattern: /^(?:async\s+)?(?:def|class)\s+[A-Za-z_]\w*/ },
   { extensions: ['.go'], pattern: /^(?:func|type)\s+/ },
+  // PHP keeps nearly everything inside one class, so methods count too: indented `function` lines with
+  // any visibility. Types and functions at the top level start the line.
+  {
+    extensions: ['.php'],
+    pattern: /^(?:(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\s+[A-Za-z_]\w*|function\s+&?[A-Za-z_]\w*|\s+(?:(?:public|protected|private|static|abstract|final)\s+)*function\s+&?[A-Za-z_]\w*)/
+  },
   { extensions: ['.rs'], pattern: /^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait)\s+[A-Za-z_]\w*/ }
 ];
 
 export function buildRepoMap(files: readonly RepoFile[], options: RepoMapOptions): RepoMap {
   const known = new Set(files.map((file) => file.path));
   const targetPath = options.targetPath ? normalizePath(options.targetPath) : undefined;
+  const seeds = seedWeights(files, extractSearchTerms(options.task), targetPath);
   const ranks = rankFiles(
     files,
-    withCoChangeEdges(buildImportEdges(files, known), options.coChange, known),
-    seedWeights(files, extractSearchTerms(options.task), targetPath)
+    withCoChangeEdges(options.edges ?? buildImportEdges(files, known), options.coChange, known),
+    seeds
   );
+  const scores = blendScores(files, ranks, seeds);
   const maxSymbols = options.maxSymbolsPerFile ?? DEFAULT_MAX_SYMBOLS;
+  const preferred = (path: string): number => (options.preferPrefix && path.startsWith(options.preferPrefix) ? 1 : 0);
   const ordered = [...files].sort((left, right) => (
-    (ranks.get(right.path) ?? 0) - (ranks.get(left.path) ?? 0) || left.path.localeCompare(right.path)
+    (scores.get(right.path) ?? 0) - (scores.get(left.path) ?? 0)
+      || preferred(right.path) - preferred(left.path)
+      || left.path.localeCompare(right.path)
   ));
 
   let text = HEADER;
@@ -81,7 +101,7 @@ export function buildRepoMap(files: readonly RepoFile[], options: RepoMapOptions
     if (symbols.length === 0) {
       continue;
     }
-    const candidate = `${text}\n${formatBlock(file.path, symbols, maxSymbols)}`;
+    const candidate = `${text}\n${formatBlock(options.formatPath?.(file.path) ?? file.path, symbols, maxSymbols)}`;
     if (estimateTokens(candidate) > options.budgetTokens) {
       omittedFiles += 1;
       continue;
@@ -103,8 +123,11 @@ export function extractSymbols(content: string, path: string): RepoSymbol[] {
 
   const symbols: RepoSymbol[] = [];
   const lines = content.split(/\r?\n/);
+  // PHP shares the JS comment and string syntax, so the same mask keeps docblocks out of the map.
+  const masked = (SCRIPT_EXTENSIONS as readonly string[]).includes(extension) || extension === '.php';
+  const code = masked ? maskJsComments(content) : lines;
   for (let index = 0; index < lines.length && symbols.length < MAX_SYMBOLS_PER_FILE; index += 1) {
-    const line = lines[index];
+    const line = code[index];
     if (!rule.pattern.test(line)) {
       continue;
     }
@@ -112,9 +135,64 @@ export function extractSymbols(content: string, path: string): RepoSymbol[] {
     if (/^(?:export\s+)?(?:const|let)\b/.test(line) && !/=>|\bfunction\b/.test(line)) {
       continue;
     }
-    symbols.push({ line: index + 1, signature: formatSignature(line) });
+    symbols.push({ line: index + 1, signature: formatSignature(lines[index]) });
   }
   return symbols;
+}
+
+/**
+ * Blanks out comments and string contents, so a declaration written inside a comment or template
+ * literal is not mistaken for code. Columns are kept, so each masked line lines up with the original.
+ * Limits: regex literals are not recognised, and a `${}` expression that contains a backtick ends the template early.
+ */
+export function maskJsComments(content: string): string[] {
+  let inBlockComment = false;
+  let inTemplate = false;
+  return content.split(/\r?\n/).map((line) => {
+    let out = '';
+    let quote: string | undefined;
+    for (let index = 0; index < line.length; index += 1) {
+      const char = line[index];
+      const next = line[index + 1];
+      if (inBlockComment) {
+        if (char === '*' && next === '/') {
+          out += '  ';
+          index += 1;
+          inBlockComment = false;
+        } else {
+          out += ' ';
+        }
+      } else if (inTemplate || quote) {
+        if (char === '\\') {
+          out += '  ';
+          index += 1;
+        } else {
+          out += ' ';
+          if (inTemplate && char === '`') {
+            inTemplate = false;
+          } else if (quote && char === quote) {
+            quote = undefined;
+          }
+        }
+      } else if (char === '/' && next === '/') {
+        out += ' '.repeat(line.length - index);
+        break;
+      } else if (char === '/' && next === '*') {
+        out += '  ';
+        index += 1;
+        inBlockComment = true;
+      } else if (char === '`') {
+        out += ' ';
+        inTemplate = true;
+      } else if (char === '"' || char === "'") {
+        out += ' ';
+        quote = char;
+      } else {
+        out += char;
+      }
+    }
+    return out;
+  });
 }
 
 /** Resolves a relative JS/TS import to a known file, including `.js`→`.ts` and `index` files. */
@@ -134,8 +212,11 @@ export function resolveRelativeImport(
   return candidates.find((candidate) => known.has(candidate) && candidate !== fromPath);
 }
 
-function buildImportEdges(files: readonly RepoFile[], known: ReadonlySet<string>): Map<string, string[]> {
-  const index = createImportIndex(files.map((file) => file.path));
+/** Each file's imports that resolve to another file in the list: relative JS/TS, Python, Go, and Rust. */
+export function buildImportEdges(files: readonly RepoFile[], known: ReadonlySet<string>): Map<string, string[]> {
+  // composer.json gives PHP's PSR-4 namespace map; it is scanned like any other JSON file.
+  const composer = files.find((file) => file.path === 'composer.json')?.content;
+  const index = createImportIndex(files.map((file) => file.path), composer);
   const edges = new Map<string, string[]>();
   for (const file of files) {
     const targets = new Set<string>();
@@ -232,12 +313,40 @@ function rankFiles(
   return rank;
 }
 
+/**
+ * Ordering score: half import rank, half direct task match, each scaled to its maximum. PageRank alone
+ * lets a file imported by many matching files outrank the files the task names, which happens in
+ * frameworks where dozens of similar controllers share the same enums and base classes.
+ */
+function blendScores(
+  files: readonly RepoFile[],
+  ranks: ReadonlyMap<string, number>,
+  seeds: ReadonlyMap<string, number>
+): Map<string, number> {
+  const maxRank = Math.max(0, ...files.map((file) => ranks.get(file.path) ?? 0));
+  const maxSeed = Math.max(0, ...files.map((file) => seeds.get(normalizePath(file.path)) ?? 0));
+  const scores = new Map<string, number>();
+  for (const file of files) {
+    const rank = maxRank > 0 ? (ranks.get(file.path) ?? 0) / maxRank : 0;
+    const seed = maxSeed > 0 ? (seeds.get(normalizePath(file.path)) ?? 0) / maxSeed : 0;
+    scores.set(file.path, rank + seed);
+  }
+  return scores;
+}
+
 function formatBlock(path: string, symbols: readonly RepoSymbol[], maxSymbols: number): string {
   const lines = [path, ...symbols.slice(0, maxSymbols).map((symbol) => `  ${symbol.line}: ${symbol.signature}`)];
   if (symbols.length > maxSymbols) {
     lines.push(`  ... ${symbols.length - maxSymbols} more`);
   }
   return lines.join('\n');
+}
+
+/** The declared name in a signature such as `export class Broker` or `func (r *T) Run(`. */
+export function symbolName(signature: string): string {
+  const match = /^(?:(?:export|default|declare|abstract|async|public|private|protected|static|final|readonly|pub(?:\([^)]*\))?|unsafe)\s+)*(?:(?:function\*?|class|interface|type|enum|const|let|var|def|fn|func|struct|trait|impl|namespace|module)\s+)?&?(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)/
+    .exec(signature);
+  return match ? match[1] : '';
 }
 
 function formatSignature(line: string): string {

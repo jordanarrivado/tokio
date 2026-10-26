@@ -31,3 +31,10 @@ test('returns safe source files and skips secrets, dependencies, and oversized f
   assert.deepEqual(result.files.map((file) => file.path), ['src/app.ts']);
   assert.equal(result.truncated, false);
 });
+
+test('stops with an AbortError once its signal is aborted', async () => {
+  const root = await createRepo({ 'src/app.ts': 'export const app = 1;\n' });
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(scanRepository(root, { signal: controller.signal }), { name: 'AbortError' });
+});

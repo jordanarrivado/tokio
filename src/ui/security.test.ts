@@ -37,6 +37,19 @@ test('webview treats messages as text and copies the live edited value', () => {
   assert.match(panelSource, /inputError\.textContent = message\.message/);
   assert.match(panelSource, /text: refinedPrompt\.value/);
   assert.match(panelSource, /targetPath\.value = message\.value/);
-  assert.match(panelSource, /rawPrompt\.value = message\.value/);
+  assert.match(panelSource, /rawPrompt\.value = [^;\n]*\(message\.value \|\| ''\)/);
   assert.doesNotMatch(panelSource, /navigator\.clipboard/);
+});
+
+const mapSource = readFileSync(join(process.cwd(), 'src', 'ui', 'map.ts'), 'utf8');
+
+test('repository map has the same restrictive policy and text-only rendering as the panel', () => {
+  assert.match(mapSource, /default-src 'none'/);
+  assert.match(mapSource, /style-src 'nonce-\$\{nonce\}'/);
+  assert.match(mapSource, /script-src 'nonce-\$\{nonce\}'/);
+  assert.doesNotMatch(mapSource, /unsafe-inline|unsafe-eval/);
+  assert.doesNotMatch(mapSource, /innerHTML|outerHTML|insertAdjacentHTML/);
+  assert.doesNotMatch(mapSource, /https?:\/\//);
+  assert.doesNotMatch(mapSource, /\bfetch\s*\(|XMLHttpRequest|WebSocket|sendBeacon/);
+  assert.match(mapSource, /localResourceRoots: \[\]/);
 });

@@ -13,7 +13,11 @@ const SERVER_VERSION: string = JSON.parse(readFileSync(join(__dirname, '..', '..
 const INSTRUCTIONS = [
   'Tokio reduces context. For a coding task: call refine_task once with the task text,',
   'then repo_map to find relevant files and line numbers, then read_symbol only for the bodies you need.',
+  'If you already know a name, find_symbol returns its path and line without a map.',
   'read_symbol returns only changed lines on repeat reads. search_output queries truncated results.',
+  'For work across repositories, list_repositories shows each one, the write target, and the merge order;',
+  'pass repo to repo_map, read_symbol, find_symbol, or route_task to target one.',
+  'Without repo, repo_map covers the repositories the task is about; repo: "*" covers all.',
   'Secret files are blocked.'
 ].join(' ');
 
@@ -34,7 +38,11 @@ export interface McpServer {
 }
 
 export function createMcpServer(broker: Broker, send: (message: object) => void): McpServer {
-  async function handleMessage(message: unknown): Promise<void> {
+  // Requests run one at a time in arrival order. Cancellations skip the queue, so they can reach a running call.
+  let queue: Promise<void> = Promise.resolve();
+  const pending = new Map<string, AbortController>();
+
+  async function handleMessage(message: unknown, signal: AbortSignal): Promise<void> {
     if (!isRecord(message) || typeof message.method !== 'string') {
       if (isRecord(message) && 'id' in message) {
         send(errorResponse(message.id, INVALID_REQUEST, 'Invalid request.'));
@@ -42,41 +50,62 @@ export function createMcpServer(broker: Broker, send: (message: object) => void)
       return;
     }
 
-    const isNotification = !('id' in message);
+    const id = message.id;
+    // Notifications never get a response, and neither does a cancelled request, as MCP requires.
+    const isRequest = 'id' in message;
+    const reply = (response: object): void => {
+      if (isRequest && !signal.aborted) {
+        send(response);
+      }
+    };
     try {
-      const result = await dispatch(message.method, message.params, broker);
-      if (!isNotification) {
-        send({ jsonrpc: JSON_RPC_VERSION, id: message.id, result });
-      }
+      const result = await dispatch(message.method, message.params, broker, signal);
+      reply({ jsonrpc: JSON_RPC_VERSION, id, result });
     } catch (error) {
-      if (!isNotification) {
-        const code = error instanceof RpcError ? error.code : INTERNAL_ERROR;
-        const text = error instanceof Error ? error.message : String(error);
-        send(errorResponse(message.id, code, text));
-      }
+      const code = error instanceof RpcError ? error.code : INTERNAL_ERROR;
+      const text = error instanceof Error ? error.message : String(error);
+      reply(errorResponse(id, code, text));
     }
   }
 
   return {
-    async handleLine(line: string): Promise<void> {
+    handleLine(line: string): Promise<void> {
       // Some Windows writers prepend a UTF-8 byte-order mark, which JSON.parse rejects.
       const text = line.replace(/^﻿/, '');
       if (text.trim().length === 0) {
-        return;
+        return queue;
       }
       let message: unknown;
       try {
         message = JSON.parse(text);
       } catch {
-        send(errorResponse(null, INVALID_REQUEST, 'Could not parse JSON.'));
-        return;
+        queue = queue.then(() => send(errorResponse(null, INVALID_REQUEST, 'Could not parse JSON.')));
+        return queue;
       }
-      await handleMessage(message);
+
+      if (isRecord(message) && message.method === 'notifications/cancelled') {
+        const params = isRecord(message.params) ? message.params : {};
+        pending.get(JSON.stringify(params.requestId))?.abort();
+        return queue;
+      }
+
+      const controller = new AbortController();
+      const key = isRecord(message) && 'id' in message ? JSON.stringify(message.id) : undefined;
+      if (key !== undefined) {
+        pending.set(key, controller);
+      }
+      queue = queue.then(async () => {
+        await handleMessage(message, controller.signal);
+        if (key !== undefined && pending.get(key) === controller) {
+          pending.delete(key);
+        }
+      });
+      return queue;
     }
   };
 }
 
-async function dispatch(method: string, params: unknown, broker: Broker): Promise<unknown> {
+async function dispatch(method: string, params: unknown, broker: Broker, signal: AbortSignal): Promise<unknown> {
   switch (method) {
     case 'initialize':
       return {
@@ -96,7 +125,11 @@ async function dispatch(method: string, params: unknown, broker: Broker): Promis
       if (typeof request.name !== 'string') {
         throw new RpcError(INVALID_PARAMS, 'tools/call requires a tool name.');
       }
-      const outcome: ToolOutcome = await broker.callTool(request.name, isRecord(request.arguments) ? request.arguments : {});
+      const outcome: ToolOutcome = await broker.callTool(
+        request.name,
+        isRecord(request.arguments) ? request.arguments : {},
+        signal
+      );
       return {
         content: [{ type: 'text', text: outcome.text }],
         ...(outcome.isError ? { isError: true } : {})
@@ -121,12 +154,12 @@ export function serveStdio(broker: Broker): void {
     process.stdout.write(`${JSON.stringify(message)}\n`);
   });
   const lines = createInterface({ input: process.stdin });
-  let chain: Promise<void> = Promise.resolve();
+  let last: Promise<void> = Promise.resolve();
   lines.on('line', (line) => {
-    // Handle requests in arrival order so responses never interleave with later state changes.
-    chain = chain.then(() => server.handleLine(line));
+    // The server queues requests in arrival order itself; handing it each line at once lets cancellations through.
+    last = server.handleLine(line);
   });
   lines.on('close', () => {
-    void chain.then(() => process.exit(0));
+    void last.then(() => process.exit(0));
   });
 }
