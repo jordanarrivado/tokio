@@ -166,7 +166,8 @@ test('fails the run when the agent is missing instead of recording empty results
       agent: { command: 'tokio-test-missing-agent-cli', args: ['-p'] },
       buildTokioPrompt: async (task) => task
     }),
-    /Agent "tokio-test-missing-agent-cli"/
+    // Direct spawn errors and Windows shell failures use different capitalization.
+    /Agent "tokio-test-missing-agent-cli"/i
   );
 });
 
