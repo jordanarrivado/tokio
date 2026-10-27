@@ -27,12 +27,12 @@ export interface InitOptions {
 
 export const AGENTS_BEGIN = '<!-- tokio:begin -->';
 export const AGENTS_END = '<!-- tokio:end -->';
-export const PRE_TOOL_MATCHER = 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell';
+export const PRE_TOOL_MATCHER = 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|SendMessage';
 /**
  * Per-user files that never belong in version control: write grants expire per machine, and the
  * repository map's node positions are a personal arrangement.
  */
-const PER_USER_FILES = ['.tokio/scope.json', '.tokio/layout.json'];
+const PER_USER_FILES = ['.tokio/scope.json', '.tokio/layout.json', '.tokio/messaging.json'];
 const SERVER_NAME = 'tokio';
 const CODEX_TABLE = '[mcp_servers.tokio]';
 
@@ -263,12 +263,16 @@ export function isOwnedCommand(command: string, subcommand: string): boolean {
   return tokens.at(-1) === subcommand && tokens.some((token) => token.endsWith('broker/cli.js'));
 }
 
+/** Codex stops an MCP call after 60 seconds by default; ask_repo runs an agent for up to three minutes. */
+const CODEX_TIMEOUT_LINE = 'tool_timeout_sec = 200';
+
 function planCodexConfig(text: string | undefined, cli: string, root: string, force: boolean): Plan {
   const block = [
     CODEX_TABLE,
     'command = "node"',
     `args = [${tomlString(cli)}, "mcp", "--root", ${tomlString(root)}]`,
-    `cwd = ${tomlString(root)}`
+    `cwd = ${tomlString(root)}`,
+    CODEX_TIMEOUT_LINE
   ];
 
   if (text === undefined || text.trim().length === 0) {
@@ -291,12 +295,18 @@ function planCodexConfig(text: string | undefined, cli: string, root: string, fo
   if (current.join('\n') === block.join('\n')) {
     return { status: 'unchanged', detail: 'tokio server already configured.' };
   }
-  if (!force) {
+  // A table written before the timeout line differs only by that line, so it is brought up to date without --force.
+  const missingOnlyTimeout = current.join('\n') === block.filter((line) => line !== CODEX_TIMEOUT_LINE).join('\n');
+  if (!force && !missingOnlyTimeout) {
     return { status: 'conflict', detail: `${CODEX_TABLE} exists with different settings; kept it. Use --force to replace.` };
   }
 
   const next = [...lines.slice(0, start), ...block, ...lines.slice(end)];
-  return { status: 'updated', detail: 'replaced the tokio server.', content: next.join('\n') };
+  return {
+    status: 'updated',
+    detail: missingOnlyTimeout ? 'added the ask_repo timeout to the tokio server.' : 'replaced the tokio server.',
+    content: next.join('\n')
+  };
 }
 
 function planAgentsGuidance(text: string | undefined, multi: boolean): Plan {

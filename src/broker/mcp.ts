@@ -18,7 +18,13 @@ const INSTRUCTIONS = [
   'For work across repositories, list_repositories shows each one, the write target, and the merge order;',
   'pass repo to repo_map, read_symbol, find_symbol, or route_task to target one.',
   'Without repo, repo_map covers the repositories the task is about; repo: "*" covers all.',
-  'Secret files are blocked.'
+  'To reach the agent in another catalog repository, use SendMessage to its open session;',
+  'without SendMessage (as in Codex) or without an open session, call ask_repo with the repository and question.',
+  'A prompt that starts with ~name:, as in "~api: why is this needed", is a question for that repository\'s agent:',
+  'relay it that way instead of answering it yourself.',
+  'Either way, the user must switch messaging on for that repository on the tokio map.',
+  'When you message another repository\'s agent, ask for feedback. When you receive one, reply with what you did,',
+  'what worked or did not, and what could be improved. Secret files are blocked.'
 ].join(' ');
 
 const JSON_RPC_VERSION = '2.0';

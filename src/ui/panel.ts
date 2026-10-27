@@ -213,9 +213,8 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       background: var(--field);
     }
     .brand-avatar { display: block; width: 100%; height: 100%; object-fit: cover; }
-    .brand-copy { min-width: 0; flex: 1; }
-    .brand-copy h1 { margin: 0; font-size: 1.05rem; font-weight: 650; line-height: 1.2; }
-    .brand-copy p { margin: 1px 0 0; }
+    .app-header h1 { margin: 0; font-size: 1.05rem; font-weight: 650; line-height: 1.2; }
+    .step-counter { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
 
     /* minmax(0, 1fr) lets columns shrink below their content, so a long line never widens the panel. */
     form { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
@@ -355,79 +354,59 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
     .also-badges { display: contents; }
     .detection-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
-    /* Repositories as a node graph: the write target on top, others on labeled connectors below. */
-    .repos-list {
-      --node-write: var(--ok);
-      --node-granted: var(--warn);
-      --node-read: var(--muted);
-      --node-missing: var(--danger);
-      display: grid;
-      padding: 10px;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      /* Dotted canvas, like a diagram board. */
-      background-color: var(--bg);
-      background-image: radial-gradient(color-mix(in srgb, var(--muted) 28%, transparent) 1px, transparent 1px);
-      background-size: 14px 14px;
+    /* Workspace scope: one line by default, compact rows when open. The armed strip is always shown while a grant is live. */
+    .scope { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-bottom: var(--gap); }
+    .scope > details { border: 1px solid var(--border); border-radius: var(--radius-sm); }
+    .scope-strip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 30px;
+      padding: 4px 10px;
+      cursor: pointer;
+      list-style: none;
+      border-radius: var(--radius-sm);
+      font-size: 0.9em;
     }
-    .repo-node {
-      --node-color: var(--node-read);
-      position: relative;
-      z-index: 1;
-      display: grid;
+    .scope-strip::-webkit-details-marker { display: none; }
+    .scope-strip:hover { background: var(--hover); }
+    .scope > details[open] > .scope-strip { border-bottom: 1px solid var(--border); border-radius: var(--radius-sm) var(--radius-sm) 0 0; }
+    .scope-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+    .scope-text strong { color: var(--ok); font-weight: 650; }
+    .scope-body { display: grid; gap: 8px; padding: 8px 10px 10px; }
+    .scope-foot { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+    .scope-foot select { width: auto; padding: 2px 6px; font-size: 0.88em; }
+
+    .armed {
+      display: flex;
+      align-items: center;
       gap: 8px;
-      padding: 10px 11px;
-      border: 1px solid var(--border-strong);
-      border-radius: 10px;
-      background: var(--surface);
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22);
+      padding: 5px 6px 5px 10px;
+      border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+      border-left: 3px solid var(--warn);
+      border-radius: var(--radius-sm);
+      color: var(--warn);
+      background: color-mix(in srgb, var(--warn) 10%, transparent);
+      font-size: 0.9em;
+      font-weight: 600;
     }
-    .repo-node[data-access="write"] {
-      --node-color: var(--node-write);
-      border-color: color-mix(in srgb, var(--node-write) 70%, transparent);
-      box-shadow: 0 0 0 1px color-mix(in srgb, var(--node-write) 25%, transparent), 0 0 14px color-mix(in srgb, var(--node-write) 22%, transparent);
-    }
-    .repo-node[data-access="granted"] { --node-color: var(--node-granted); border-color: color-mix(in srgb, var(--node-granted) 55%, transparent); }
-    .repo-node[data-access="missing"] { --node-color: var(--node-missing); border-style: dashed; border-color: color-mix(in srgb, var(--node-missing) 60%, transparent); }
+    .armed span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .armed[data-soon="true"] { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, transparent); border-left-color: var(--danger); }
 
-    .repo-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
-    .repo-tile {
-      display: grid;
-      place-items: center;
-      width: 34px;
-      height: 34px;
-      flex: 0 0 34px;
-      border-radius: 8px;
-      color: var(--node-color);
-      background: color-mix(in srgb, var(--node-color) 16%, var(--field));
-      font-size: 0.78em;
-      font-weight: 800;
-      letter-spacing: 0.03em;
-    }
-    .repo-copy { display: grid; min-width: 0; flex: 1; }
-    .repo-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
-    .repo-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 0.8em; }
-    .repo-dot {
-      width: 9px;
-      height: 9px;
-      flex: 0 0 9px;
-      align-self: flex-start;
-      margin-top: 3px;
-      border-radius: 50%;
-      background: var(--node-color);
-      box-shadow: 0 0 6px var(--node-color);
-    }
-    .repo-node[data-access="read"] .repo-dot { background: transparent; border: 1.5px solid var(--node-read); box-shadow: none; }
-
-    .repo-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
-    .repo-actions { display: flex; align-items: center; gap: 4px; }
+    .repo-rows { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+    .repo-row { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 30px; padding: 0 2px; border-radius: 4px; }
+    .repo-row:hover { background: var(--hover); }
+    .repo-index { width: 16px; flex: 0 0 16px; color: var(--muted); font-size: 0.8em; text-align: right; font-variant-numeric: tabular-nums; }
+    .repo-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .repo-row[data-access="write"] .repo-name { color: var(--ok); font-weight: 650; }
+    .repo-row[data-access="missing"] .repo-name { color: var(--danger); text-decoration: line-through; }
+    .repo-toggle[aria-pressed="true"] { border-color: color-mix(in srgb, var(--warn) 55%, transparent); color: var(--warn); font-variant-numeric: tabular-nums; }
     .repo-more { position: relative; }
     .repo-more > summary {
       display: grid;
       place-items: center;
       width: 26px;
       height: 26px;
-      border: 1px solid var(--border-strong);
       border-radius: 50%;
       color: var(--muted);
       cursor: pointer;
@@ -444,7 +423,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       z-index: 3;
       display: grid;
       gap: 4px;
-      min-width: 150px;
+      min-width: 160px;
       padding: 6px;
       border: 1px solid var(--border-strong);
       border-radius: var(--radius-sm);
@@ -452,55 +431,24 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
     }
     .repo-menu button { justify-content: flex-start; }
-    /* Nodes stack in order, so the one with an open menu comes forward to keep the menu on top. */
-    .repo-branch:has(.repo-more[open]), .repo-node:has(.repo-more[open]) { z-index: 5; }
+    .repo-row:has(.repo-more[open]) { position: relative; z-index: 5; }
 
-    /* Connectors: a dashed trunk from the write target, one branch per repository, labeled by relation. */
-    .repo-branches {
-      --trunk: color-mix(in srgb, var(--muted) 55%, transparent);
-      /* Where a connector meets a node: below the edge label, at the node's head. */
-      --joint: 44px;
-      display: grid;
-      gap: 14px;
-      margin-left: 20px;
-      padding: 18px 0 0 18px;
-    }
-    .repo-branch { --edge-color: var(--trunk); position: relative; display: grid; gap: 4px; }
-    .repo-branch[data-access="granted"] { --edge-color: var(--node-granted); }
-    .repo-branch[data-access="missing"] { --edge-color: var(--node-missing); }
-    /* Each branch draws the trunk down from the one above, so the trunk ends at the last connector. */
-    .repo-branch::after {
-      content: '';
-      position: absolute;
-      left: -18px;
-      top: -14px;
-      height: calc(var(--joint) + 14px);
-      border-left: 2px dashed var(--trunk);
-    }
-    .repo-branch:first-child::after { top: -18px; height: calc(var(--joint) + 18px); }
-    .repo-branch::before {
-      content: '';
-      position: absolute;
-      left: -18px;
-      top: var(--joint);
-      width: 18px;
-      border-top: 2px dashed var(--edge-color);
-    }
-    .repo-branch[data-access="granted"]::before { border-top-style: solid; }
-    .repo-edge {
-      justify-self: start;
-      padding: 0 8px;
-      border: 1px solid var(--edge-color);
+    /* Repositories the task names, suggested only: granting edits still takes a click. */
+    .scope-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.86em; }
+    .scope-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      max-width: 100%;
+      padding: 1px 2px 1px 9px;
+      border: 1px dashed var(--border-strong);
       border-radius: 999px;
       color: var(--muted);
-      background: var(--bg);
-      font-size: 0.75em;
-      line-height: 1.6;
     }
-    .repo-branch[data-access="granted"] .repo-edge { color: var(--node-granted); }
-    .repo-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; }
-    .repo-controls .field { flex: 0 1 150px; }
-    .repo-controls .toolbar { flex: 1 1 auto; justify-content: flex-end; }
+    .scope-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .scope-chip[data-access="granted"] { border-style: solid; border-color: color-mix(in srgb, var(--warn) 55%, transparent); color: var(--warn); padding-right: 9px; }
+    .scope-chip[data-access="missing"] { color: var(--danger); padding-right: 9px; }
+    .scope-chip button { min-height: 20px; padding: 0 7px; border-radius: 999px; font-size: 0.95em; }
 
     /* Prompt clarity */
     .analysis {
@@ -587,53 +535,13 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       background: var(--accent-soft);
     }
     .error { margin: 0; color: var(--danger); font-size: 0.9em; }
-    .footer-note { padding: 0 4px 14px; text-align: center; }
-    /* Journey: Compose › Refine › Review › Use. Compose and Review are also the two views. */
-    .journey { margin: 0 0 var(--gap); }
-    .journey ol { display: flex; gap: 4px; margin: 0; padding: 0; list-style: none; }
-    .journey li { flex: 1 1 0; min-width: 0; }
-    .journey-step {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      width: 100%;
-      min-height: 30px;
-      padding: 4px 6px;
-      border: 1px solid transparent;
-      border-bottom: 2px solid var(--border);
-      border-radius: 0;
-      color: var(--muted);
-      background: transparent;
-      font-size: 0.88em;
-      font-weight: 600;
-      white-space: nowrap;
-    }
-    button.journey-step:hover:not(:disabled) { color: var(--text); background: var(--hover); }
-    .journey-dot {
-      display: inline-grid;
-      place-items: center;
-      width: 18px;
-      height: 18px;
-      flex: 0 0 18px;
-      border: 1px solid var(--border-strong);
-      border-radius: 50%;
-      font-size: 0.82em;
-    }
-    .journey li[data-state="current"] .journey-step { color: var(--text); border-bottom-color: var(--accent); }
-    .journey li[data-state="current"] .journey-dot { color: var(--accent-fg); border-color: var(--accent); background: var(--accent); }
-    .journey li[data-state="done"] .journey-step { color: var(--text); border-bottom-color: color-mix(in srgb, var(--ok) 60%, transparent); }
-    .journey li[data-state="done"] .journey-dot { color: var(--bg); border-color: var(--ok); background: var(--ok); }
-    .journey li[data-state="busy"] .journey-dot { border-color: var(--accent); border-top-color: transparent; animation: spin 0.8s linear infinite; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
+    #stage-review { justify-self: center; }
     .view { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
 
     /* Hierarchy: the main card stands out; the workspace and utilities step back. */
     .primary-card { border-color: color-mix(in srgb, var(--accent-text) 30%, var(--border)); }
     .primary-card > .section-title h2 { font-size: 1rem; }
     #raw-prompt { min-height: 140px; }
-    .workspace { background: transparent; }
     .subsection { display: grid; gap: 8px; padding-top: var(--gap); border-top: 1px solid var(--border); }
     .subsection-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
     .subsection-head h3 { margin: 0; font-size: 0.92em; font-weight: 600; }
@@ -715,72 +623,59 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       <div class="brand-mark" aria-hidden="true">
         <img class="brand-avatar" src="${avatarUri}" alt="">
       </div>
-      <div class="brand-copy">
-        <h1>Tokio</h1>
-        <p class="hint">Focused prompts, less wandering.</p>
-      </div>
+      <h1>Tokio</h1>
+      <span id="step-counter" class="hint step-counter">Step 1 of 4 · Compose</span>
       <span class="local-badge" title="No AI or network requests">● Local</span>
+      <details class="repo-more app-menu">
+        <summary title="Workspace actions" aria-label="Workspace actions">•••</summary>
+        <div class="repo-menu">
+          <button id="repos-map" class="ghost compact" type="button" title="Open the draggable repository map in an editor tab">⤢ Open Map</button>
+          <button id="repos-add" class="ghost compact" type="button">+ Add Repository</button>
+          <button id="repos-clear" class="ghost compact" type="button">Revoke All Edits</button>
+        </div>
+      </details>
     </header>
 
-    <nav class="journey" aria-label="Progress">
-      <ol>
-        <li data-stage="compose" data-state="current">
-          <button id="stage-compose" type="button" class="journey-step" aria-current="step"><span class="journey-dot">1</span>Compose</button>
-        </li>
-        <li data-stage="refine" data-state="todo"><span class="journey-step"><span class="journey-dot">2</span>Refine</span></li>
-        <li data-stage="review" data-state="todo">
-          <button id="stage-review" type="button" class="journey-step"><span class="journey-dot">3</span>Review</button>
-        </li>
-        <li data-stage="use" data-state="todo"><span class="journey-step"><span class="journey-dot">4</span>Use</span></li>
-      </ol>
-    </nav>
+    <section class="scope" aria-label="Workspace">
+      <div id="armed-strip" class="armed" role="status" hidden>
+        <span id="armed-text"></span>
+        <button id="armed-revoke" class="ghost compact" type="button">Revoke</button>
+      </div>
+      <details id="repos-details">
+        <summary class="scope-strip" title="The agent edits only the write target (✎). Open to allow edits in another repository.">
+          <span class="chevron" aria-hidden="true">›</span>
+          <span id="repos-summary" class="scope-text">Reading workspace…</span>
+        </summary>
+        <div class="scope-body">
+          <ol id="repos-list" class="repo-rows" aria-label="Repositories in merge order"></ol>
+          <div class="scope-foot">
+            <label for="repos-hours" class="hint">New edit grants last</label>
+            <select id="repos-hours">
+              <option value="1">1 hour</option>
+              <option value="2">2 hours</option>
+              <option value="4" selected>4 hours</option>
+              <option value="8">8 hours</option>
+              <option value="24">24 hours</option>
+            </select>
+          </div>
+        </div>
+      </details>
+      <p id="repos-status" class="status" role="status" aria-live="polite"></p>
+    </section>
 
     <form id="refine-form" novalidate autocomplete="off">
       <div id="compose-view" class="view">
-        <section class="card collapsible workspace" aria-labelledby="repos-heading">
-          <details id="repos-details">
-            <summary class="card-head">
-              <span class="chevron" aria-hidden="true">›</span>
-              <h2 id="repos-heading">Workspace</h2>
-              <span id="repos-summary" class="chip">tokio.repos.json</span>
-            </summary>
-            <div class="card-body">
-              <p class="hint">The agent edits only the write target. Allow edits in another repository when a task needs it.</p>
-              <div id="repos-list" class="repos-list"></div>
-              <p id="repos-order" class="hint"></p>
-              <div class="repo-controls">
-                <div class="field">
-                  <label for="repos-hours">Allow edits for</label>
-                  <select id="repos-hours">
-                    <option value="1">1 hour</option>
-                    <option value="2">2 hours</option>
-                    <option value="4" selected>4 hours</option>
-                    <option value="8">8 hours</option>
-                    <option value="24">24 hours</option>
-                  </select>
-                </div>
-                <div class="toolbar" aria-label="Repository tools">
-                  <button id="repos-map" class="secondary compact" type="button" title="Open the draggable repository map in an editor tab">⤢ Open Map</button>
-                  <button id="repos-add" class="ghost compact" type="button">+ Add Repository</button>
-                  <button id="repos-clear" class="ghost compact" type="button">Revoke All</button>
-                  <button id="repos-refresh" class="ghost compact" type="button">Refresh</button>
-                </div>
-              </div>
-              <p id="repos-status" class="status" role="status" aria-live="polite"></p>
-            </div>
-          </details>
-        </section>
-
         <section class="card primary-card" aria-labelledby="request-heading">
           <div class="section-title">
             <h2 id="request-heading">Describe your change</h2>
-            <span id="raw-stats" class="hint stats">0 chars · ≈0 tokens</span>
+            <span id="raw-stats" class="hint stats">≈0 tokens</span>
           </div>
 
           <div class="field">
             <label for="raw-prompt" class="visually-hidden">Describe your change</label>
             <textarea id="raw-prompt" required aria-describedby="raw-hint input-error" placeholder="What should change? Include the pain point, expected behavior, and constraints."></textarea>
             <p id="input-error" class="error" role="alert" hidden></p>
+            <div id="scope-chips" class="scope-chips" aria-live="polite" hidden></div>
             <div id="analysis" class="analysis" aria-live="polite" hidden>
               <div class="analysis-head">
                 <span>Prompt clarity</span>
@@ -930,6 +825,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             <span class="cta-label">Refine Prompt</span> <span class="shortcut">Ctrl ↵</span>
           </button>
           <p id="refine-hint" class="hint action-hint" aria-live="polite"></p>
+          <button id="stage-review" class="link" type="button" hidden>Back to refined prompt ›</button>
         </div>
       </div>
 
@@ -947,7 +843,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           </div>
           <div class="section-title">
             <h2 id="output-heading">Refined prompt</h2>
-            <span id="refined-stats" class="hint stats">0 chars · ≈0 tokens</span>
+            <span id="refined-stats" class="hint stats">≈0 tokens</span>
           </div>
           <textarea id="refined-prompt" aria-label="Refined prompt" aria-describedby="result-status" placeholder="Your editable, scoped prompt will appear here."></textarea>
           <p id="result-status" class="status" role="status" aria-live="polite"></p>
@@ -986,8 +882,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           <button id="clear-button" class="link danger-link" type="button">Clear everything…</button>
         </div>
       </div>
-
-      <p class="hint footer-note">Everything runs locally. Review, copy, and paste into your coding agent.</p>
     </form>
   </main>
 
@@ -1042,23 +936,27 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const reposDetails = document.getElementById('repos-details');
       const reposSummary = document.getElementById('repos-summary');
       const reposList = document.getElementById('repos-list');
-      const reposOrder = document.getElementById('repos-order');
       const reposHours = document.getElementById('repos-hours');
       const reposAdd = document.getElementById('repos-add');
       const reposMap = document.getElementById('repos-map');
       const reposClear = document.getElementById('repos-clear');
-      const reposRefresh = document.getElementById('repos-refresh');
       const reposStatus = document.getElementById('repos-status');
+      const armedStrip = document.getElementById('armed-strip');
+      const armedText = document.getElementById('armed-text');
+      const armedRevoke = document.getElementById('armed-revoke');
       let reposRequestId = 0;
       let pendingReposRequestId = 0;
-      let reposLoaded = false;
+      let reposView;
+      let pendingReposAction = 'list';
+      // Set once the repository code below is ready; the stats update calls it on every prompt change.
+      let renderScopeChips = () => {};
+      let reposStatusTimer;
 
       // Journey: Compose and Review are two views of one task; Refine and Use are tracked as steps.
       const composeView = document.getElementById('compose-view');
       const reviewView = document.getElementById('review-view');
-      const stageCompose = document.getElementById('stage-compose');
       const stageReview = document.getElementById('stage-review');
-      const journeySteps = Array.from(document.querySelectorAll('.journey li'));
+      const stepCounter = document.getElementById('step-counter');
       const contextChips = document.getElementById('context-chips');
       const settingsSummary = document.getElementById('settings-summary');
       const refineHint = document.getElementById('refine-hint');
@@ -1177,17 +1075,14 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const updateJourney = () => {
         const hasResult = refinedPrompt.value.length > 0;
         const stale = !staleBanner.hidden;
-        const states = {
-          compose: view === 'compose' ? 'current' : hasResult ? 'done' : 'todo',
-          refine: refining ? 'busy' : hasResult && !stale ? 'done' : 'todo',
-          review: view === 'review' ? 'current' : hasResult ? 'done' : 'todo',
-          use: used && !stale ? 'done' : 'todo'
-        };
-        journeySteps.forEach((step) => {
-          step.dataset.state = states[step.dataset.stage];
-        });
-        stageCompose.setAttribute('aria-current', view === 'compose' ? 'step' : 'false');
-        stageReview.setAttribute('aria-current', view === 'review' ? 'step' : 'false');
+        // The main button names the next action, so one counter replaces the four-step bar.
+        const [number, name] = refining
+          ? [2, 'Refining…']
+          : view === 'review'
+            ? used && !stale ? [4, 'Used'] : [3, 'Review']
+            : [1, 'Compose'];
+        stepCounter.textContent = 'Step ' + number + ' of 4 · ' + name;
+        stageReview.hidden = view !== 'compose' || !hasResult;
         reviewEmpty.hidden = hasResult;
         reviewContent.hidden = !hasResult;
         copyButton.disabled = !hasResult;
@@ -1345,15 +1240,15 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       };
 
       const formatStats = (value) => {
-        const characters = value.length;
         const estimatedTokens = estimateTokens(value);
-        return characters.toLocaleString() + ' chars · ≈' + estimatedTokens.toLocaleString() + ' tokens';
+        return '≈' + estimatedTokens.toLocaleString() + ' tokens';
       };
 
       const estimateTokens = (value) => value.length === 0 ? 0 : Math.ceil(value.length / 4);
 
       const updateStats = () => {
         rawStats.textContent = formatStats(rawPrompt.value);
+        renderScopeChips();
         refinedStats.textContent = formatStats(refinedPrompt.value);
         const comparableRaw = rawPrompt.value + (targetPath.value.trim() ? '\\n\\n' + targetPath.value.trim() : '');
         const rawEstimate = estimateTokens(comparableRaw);
@@ -1674,7 +1569,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         showView('compose', true);
       });
 
-      stageCompose.addEventListener('click', () => showView('compose', true));
       stageReview.addEventListener('click', () => showView('review'));
       editOriginalButton.addEventListener('click', () => showView('compose', true));
       reviewComposeButton.addEventListener('click', () => showView('compose', true));
@@ -1735,7 +1629,11 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const requestRepos = (action, name) => {
         reposRequestId += 1;
         pendingReposRequestId = reposRequestId;
-        reposStatus.textContent = action === 'list' ? 'Reading tokio.repos.json...' : 'Updating...';
+        pendingReposAction = action;
+        // A plain reload stays quiet; only changes the user asked for report progress.
+        if (action !== 'list') {
+          showReposStatus('Updating...');
+        }
         vscode.postMessage({
           type: 'repos',
           requestId: reposRequestId,
@@ -1743,6 +1641,15 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           name,
           hours: action === 'grant' ? Number(reposHours.value) : undefined
         });
+      };
+
+      // Repository messages fade after a few seconds, so the strip stays one line.
+      const showReposStatus = (text) => {
+        clearTimeout(reposStatusTimer);
+        reposStatus.textContent = text || '';
+        if (text) {
+          reposStatusTimer = setTimeout(() => { reposStatus.textContent = ''; }, 4000);
+        }
       };
 
       const repoButton = (label, title, onClick) => {
@@ -1760,10 +1667,15 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         return Number.isNaN(date.getTime()) ? iso : date.toLocaleString([], { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
       };
 
-      // Two letters for a node's tile: the first letters of the first two name parts.
-      const initials = (name) => {
-        const parts = name.split(/[-_.\\s]+/).filter(Boolean);
-        return ((parts[0] || '?').charAt(0) + (parts[1] || parts[0] || '').charAt(parts[1] ? 0 : 1)).toUpperCase();
+      const minutesLeft = (iso) => Math.ceil((new Date(iso).getTime() - Date.now()) / 60000);
+
+      // Time left on a grant, as 3h05m or 12m.
+      const formatLeft = (iso) => {
+        const minutes = minutesLeft(iso);
+        if (!(minutes > 0)) {
+          return 'expired';
+        }
+        return minutes >= 60 ? Math.floor(minutes / 60) + 'h' + String(minutes % 60).padStart(2, '0') + 'm' : minutes + 'm';
       };
 
       const element = (tag, className, text) => {
@@ -1777,43 +1689,43 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         return node;
       };
 
-      // One repository as a node: tile, name and path, status dot, access chip, and actions.
+      const isGranted = (repo) => repo.access === 'granted' && !repo.missing;
+
+      // Merge position, 1-based; 0 when the catalog leaves a repository out of the order.
+      const mergePosition = (repo) => reposView.mergeOrder.indexOf(repo.name) + 1;
+      const byMergeOrder = (a, b) => (mergePosition(a) || Infinity) - (mergePosition(b) || Infinity);
+
+      // One repository per row: merge position, name, and one control for its access.
       const repoNode = (repo) => {
         const state = repo.missing ? 'missing' : repo.access;
-        const node = element('div', 'repo-row repo-node');
-        node.dataset.access = state;
+        const row = element('li', 'repo-row');
+        row.dataset.access = state;
+        const position = mergePosition(repo);
+        row.append(element('span', 'repo-index', position > 0 ? String(position) : '·'));
 
-        const head = element('div', 'repo-head');
-        const tile = element('span', 'repo-tile', initials(repo.name));
-        tile.setAttribute('aria-hidden', 'true');
-        const copy = element('div', 'repo-copy');
-        copy.append(element('strong', 'repo-name', repo.name), element('span', 'hint repo-path', repo.path));
-        copy.title = repo.path + (repo.purpose ? ' · ' + repo.purpose : '')
+        const name = element('span', 'repo-name', (state === 'write' ? '✎ ' : '') + repo.name);
+        name.title = repo.path + (repo.purpose ? ' · ' + repo.purpose : '')
           + (repo.dependsOn.length > 0 ? ' · depends on ' + repo.dependsOn.join(', ') : '');
-        const dot = element('span', 'repo-dot');
-        dot.title = state === 'write' ? 'Write target' : state === 'granted' ? 'Edits allowed' : state === 'missing' ? 'Folder missing' : 'Read-only';
-        head.append(tile, copy, dot);
-        node.append(head);
+        row.append(name);
 
-        const foot = element('div', 'repo-foot');
-        const badge = element('span', 'repo-badge', state === 'missing'
-          ? 'missing'
-          : state === 'write'
-            ? 'write target'
-            : state === 'granted'
-              ? 'edits until ' + formatUntil(repo.grantedUntil)
-              : 'read-only');
-        badge.dataset.access = state;
-        foot.append(badge);
+        // The write target is marked by ✎ alone; it has no control, since it is always writable.
+        if (state === 'missing') {
+          const badge = element('span', 'repo-badge', 'missing');
+          badge.dataset.access = state;
+          row.append(badge);
+        } else if (state !== 'write') {
+          // The toggle is the access state: pressed means the agent may edit here until the grant ends.
+          const granted = state === 'granted';
+          const toggle = granted
+            ? repoButton('✎ ' + formatLeft(repo.grantedUntil), 'Edits allowed until ' + formatUntil(repo.grantedUntil) + '. Click to make ' + repo.name + ' read-only.', () => requestRepos('revoke', repo.name))
+            : repoButton('Allow edits', repo.name + ' is read-only. Click to let the agent edit it for ' + reposHours.selectedOptions[0].text + '.', () => requestRepos('grant', repo.name));
+          toggle.classList.add('repo-toggle');
+          toggle.dataset.repo = repo.name;
+          toggle.setAttribute('aria-pressed', String(granted));
+          row.append(toggle);
+        }
 
         if (repo.access !== 'write') {
-          const actions = element('div', 'repo-actions');
-          // A missing folder cannot be edited, so it offers only the menu, where Remove lives.
-          if (!repo.missing) {
-            actions.append(repo.access === 'granted'
-              ? repoButton('Revoke', 'Make ' + repo.name + ' read-only again', () => requestRepos('revoke', repo.name))
-              : repoButton('Allow Edits', 'Let the agent edit ' + repo.name + ' for the chosen hours', () => requestRepos('grant', repo.name)));
-          }
           const more = element('details', 'repo-more');
           const summary = element('summary', '', '•••');
           summary.title = 'More actions for ' + repo.name;
@@ -1824,63 +1736,143 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             repoButton('Remove', 'Remove ' + repo.name + ' from tokio.repos.json', () => requestRepos('remove', repo.name))
           );
           more.append(summary, menu);
-          actions.append(more);
-          foot.append(actions);
+          row.append(more);
         }
-        node.append(foot);
-        return node;
+        return row;
       };
 
-      // How a repository relates to the write target, for the connector label.
-      const relationTo = (root, repo) => {
-        if (root && root.dependsOn.includes(repo.name)) {
-          return 'depends on';
+      // One line that answers "what can the agent edit?" without opening the list.
+      const renderScopeSummary = (view) => {
+        const write = view.repos.find((repo) => repo.name === view.defaultRepo);
+        const granted = view.repos.filter(isGranted);
+        const read = view.repos.filter((repo) => repo.access === 'read' && !repo.missing);
+        const missing = view.repos.filter((repo) => repo.missing).length;
+        reposSummary.replaceChildren(element('strong', '', '✎ ' + [write ? write.name : view.defaultRepo, ...granted.map((repo) => repo.name)].join(' + ')));
+        if (!view.fromFile) {
+          reposSummary.append(' · open to add a repository');
+          return;
         }
-        if (repo.dependsOn.includes(root ? root.name : '')) {
-          return 'used by';
+        if (read.length > 0) {
+          reposSummary.append(read.length <= 3 ? ' · read: ' + read.map((repo) => repo.name).join(', ') : ' · ' + read.length + ' read-only');
         }
-        return 'linked';
+        if (missing > 0) {
+          reposSummary.append(' · ' + missing + ' missing');
+        }
       };
 
-      // The write target is the root node; every other repository hangs off it on a labeled connector.
+      // Always visible while any grant is live, with the time left; it turns red in the last 10 minutes.
+      const renderArmed = () => {
+        const granted = reposView ? reposView.repos.filter(isGranted) : [];
+        armedStrip.hidden = granted.length === 0;
+        reposClear.disabled = granted.length === 0;
+        if (granted.length === 0) {
+          return;
+        }
+        armedText.textContent = 'Edits allowed: ' + granted.map((repo) => repo.name + ' ' + formatLeft(repo.grantedUntil)).join(', ');
+        armedText.title = granted.map((repo) => repo.name + ' until ' + formatUntil(repo.grantedUntil)).join('\\n');
+        armedStrip.dataset.soon = String(granted.some((repo) => minutesLeft(repo.grantedUntil) <= 10));
+        armedRevoke.textContent = granted.length === 1 ? 'Revoke' : 'Revoke all';
+        armedRevoke.title = granted.length === 1 ? 'Make ' + granted[0].name + ' read-only again' : 'Make every granted repository read-only again';
+      };
+
       const renderRepos = (view) => {
-        reposList.replaceChildren();
-        const count = view.repos.length;
-        reposSummary.textContent = count + (count === 1 ? ' repository' : ' repositories') + ' · write: ' + view.defaultRepo;
-        const root = view.repos.find((repo) => repo.name === view.defaultRepo);
-        if (root) {
-          reposList.append(repoNode(root));
-        }
-        const others = view.repos.filter((repo) => repo !== root);
-        if (others.length > 0) {
-          const branches = element('div', 'repo-branches');
-          others.forEach((repo) => {
-            const branch = element('div', 'repo-branch');
-            branch.dataset.access = repo.missing ? 'missing' : repo.access;
-            const edge = element('span', 'repo-edge', relationTo(root, repo));
-            branch.append(edge, repoNode(repo));
-            branches.append(branch);
-          });
-          reposList.append(branches);
-        }
-
-        reposOrder.textContent = view.mergeOrder.length > 0
-          ? 'Merge order: ' + view.mergeOrder.join(' → ')
-          : view.fromFile
-            ? ''
-            : 'No tokio.repos.json yet. Add a repository to create one.';
-        reposClear.disabled = !view.repos.some((repo) => repo.access === 'granted');
+        reposView = view;
+        reposList.replaceChildren(...[...view.repos].sort(byMergeOrder).map(repoNode));
+        renderScopeSummary(view);
+        renderArmed();
+        renderScopeChips();
       };
 
-      reposDetails.addEventListener('toggle', () => {
-        if (reposDetails.open && !reposLoaded) {
+      // True when the text names the repository as a whole word, or contains its folder path; like mentions() in the broker.
+      const taskMentions = (text, repo) => {
+        const lower = text.toLowerCase();
+        const path = repo.path.toLowerCase();
+        if (path && lower.split(String.fromCharCode(92)).join('/').includes(path)) {
+          return true;
+        }
+        const name = repo.name.toLowerCase();
+        const wordChar = /[a-z0-9_-]/;
+        for (let index = lower.indexOf(name); index >= 0; index = lower.indexOf(name, index + 1)) {
+          const before = lower.charAt(index - 1);
+          const after = lower.charAt(index + name.length);
+          if (!wordChar.test(before) && !wordChar.test(after)) {
+            return true;
+          }
+        }
+        return false;
+      };
+
+      const scopeChips = document.getElementById('scope-chips');
+      renderScopeChips = () => {
+        const named = reposView
+          ? reposView.repos.filter((repo) => repo.access !== 'write' && taskMentions(rawPrompt.value, repo)).sort(byMergeOrder)
+          : [];
+        scopeChips.hidden = named.length === 0;
+        if (named.length === 0) {
+          scopeChips.replaceChildren();
+          return;
+        }
+        scopeChips.replaceChildren(element('span', 'hint', 'Task mentions'), ...named.map((repo) => {
+          const state = repo.missing ? 'missing' : repo.access;
+          const chip = element('span', 'scope-chip');
+          chip.dataset.access = state;
+          if (state === 'granted') {
+            chip.append(element('span', '', '✎ ' + repo.name + ' ' + formatLeft(repo.grantedUntil)));
+            chip.title = 'The agent may edit ' + repo.name + ' until ' + formatUntil(repo.grantedUntil) + '.';
+          } else if (state === 'missing') {
+            chip.append(element('span', '', repo.name + ' · missing'));
+            chip.title = 'The folder ' + repo.path + ' is missing.';
+          } else {
+            chip.append(element('span', '', repo.name + ' · read-only'));
+            chip.title = 'The agent can read ' + repo.name + ' but not edit it.';
+            chip.append(repoButton('Allow edits', 'Let the agent edit ' + repo.name + ' for ' + reposHours.selectedOptions[0].text + '.', () => requestRepos('grant', repo.name)));
+          }
+          return chip;
+        }));
+      };
+
+      // Count grants down, and reload once one ends so the access shown is never stale.
+      setInterval(() => {
+        if (!reposView) {
+          return;
+        }
+        if (reposView.repos.some((repo) => isGranted(repo) && !(minutesLeft(repo.grantedUntil) > 0))) {
+          requestRepos('list');
+          showReposStatus('An edit grant ended. That repository is read-only again.');
+          return;
+        }
+        renderArmed();
+        renderScopeChips();
+        reposView.repos.filter(isGranted).forEach((repo) => {
+          const toggle = reposList.querySelector('.repo-toggle[data-repo="' + CSS.escape(repo.name) + '"]');
+          if (toggle) {
+            toggle.textContent = '✎ ' + formatLeft(repo.grantedUntil);
+          }
+        });
+      }, 30000);
+
+      armedRevoke.addEventListener('click', () => {
+        const granted = reposView ? reposView.repos.filter(isGranted) : [];
+        if (granted.length === 1) {
+          requestRepos('revoke', granted[0].name);
+        } else if (granted.length > 1) {
+          requestRepos('clearGrants');
+        }
+      });
+      // Menu actions close the menu, so it never covers the result.
+      const fromMenu = (button, action) => button.addEventListener('click', () => {
+        button.closest('details')?.removeAttribute('open');
+        requestRepos(action);
+      });
+      fromMenu(reposAdd, 'add');
+      fromMenu(reposMap, 'openMap');
+      fromMenu(reposClear, 'clearGrants');
+      // The catalog can change outside the panel, so reload whenever the panel comes back into view.
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
           requestRepos('list');
         }
       });
-      reposAdd.addEventListener('click', () => requestRepos('add'));
-      reposMap.addEventListener('click', () => requestRepos('openMap'));
-      reposClear.addEventListener('click', () => requestRepos('clearGrants'));
-      reposRefresh.addEventListener('click', () => requestRepos('list'));
 
       window.addEventListener('message', (event) => {
         const message = event.data;
@@ -1899,10 +1891,12 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
             return;
           }
           if (message.view) {
-            reposLoaded = true;
             renderRepos(message.view);
           }
-          reposStatus.textContent = message.message;
+          // A reload that works needs no message; failures and requested changes do.
+          if (!message.success || pendingReposAction !== 'list') {
+            showReposStatus(message.message);
+          }
           return;
         }
 

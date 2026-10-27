@@ -20,6 +20,7 @@ import {
 } from '../broker/catalog';
 import { detectCrossRepoLinks } from '../broker/repos';
 import { clearScope, grantScope, readGrants, revokeScope } from '../broker/scope';
+import { ownRepo, readConnections, setConnection } from '../broker/messaging';
 import { isStoredEntry } from '../broker/stats';
 
 /**
@@ -42,6 +43,8 @@ export interface RepoRow {
   access: 'write' | 'granted' | 'read';
   grantedUntil?: string;
   missing: boolean;
+  /** Whether agents here and in this repository may message each other. Absent for this repository itself. */
+  messaging?: boolean;
 }
 
 /** A declared file link, with ends written as `"repo:path"`. */
@@ -113,6 +116,7 @@ export interface RepoCatalogService {
   grant(name: string, hours: number): Promise<RepoCatalogView>;
   revoke(name: string): Promise<RepoCatalogView>;
   clearGrants(): Promise<RepoCatalogView>;
+  setMessaging(name: string, on: boolean): Promise<RepoCatalogView>;
   setDefault(name: string): Promise<RepoCatalogView>;
   /** Undefined when the user cancels the folder picker. */
   add(): Promise<RepoCatalogView | undefined>;
@@ -154,6 +158,10 @@ export function createRepoCatalogService(prompts: RepoPrompts): RepoCatalogServi
     },
     async clearGrants() {
       await clearScope(prompts.root());
+      return view();
+    },
+    async setMessaging(name, on) {
+      await setConnection(prompts.root(), name, on);
       return view();
     },
     async setDefault(name) {
@@ -244,6 +252,8 @@ export async function describeCatalog(root: string, now = new Date()): Promise<R
   const catalog: Catalog = await loadCatalog(root);
   const missing = await findMissingRepos(catalog);
   const grants = await readGrants(root, now);
+  const own = ownRepo(catalog, root);
+  const connected = await readConnections(own.path);
   return {
     fromFile: catalog.fromFile,
     defaultRepo: catalog.defaultRepo,
@@ -258,7 +268,8 @@ export async function describeCatalog(root: string, now = new Date()): Promise<R
         dependsOn: repo.dependsOn,
         access,
         ...(access === 'granted' && grant ? { grantedUntil: grant.expiresAt } : {}),
-        missing: missing.has(repo.name)
+        missing: missing.has(repo.name),
+        ...(repo.name === own.name ? {} : { messaging: connected.includes(repo.name) })
       };
     }),
     links: catalog.links.map((link) => ({

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFile, writeFile } from 'node:fs/promises';
 import { refinePrompt } from '../core/refine';
+import { estimateTokens } from '../core/tokens';
 import type { AgentCommand } from './bench';
 import { formatBenchSummary, parseBenchTasks, runBench } from './bench';
 import { buildRepoMap } from '../context/repomap';
@@ -14,6 +15,7 @@ import { serveStdio } from './mcp';
 import { formatStats, readAuditEntries, summarizeAudit } from './stats';
 import { decidePromptContext, parsePromptHookEvent } from './prompt-hook';
 import { initProject } from './init';
+import { addressedPromptContext, evaluateMessaging } from './messaging';
 import { runDoctor } from './doctor';
 import { Broker } from './tools';
 
@@ -229,6 +231,21 @@ async function runPromptHookCommand(): Promise<void> {
       return;
     }
     const root = event.cwd ?? process.cwd();
+    // A prompt that starts with ~name: is for another repository's agent, so it gets relay instructions, not a map.
+    const addressed = await addressedPromptContext(root, event.prompt);
+    if (addressed) {
+      process.stdout.write(`${addressed.text}\n`);
+      await appendAuditEntry(root, {
+        tool: 'prompt-route',
+        inputTokens: 0,
+        outputTokens: estimateTokens(addressed.text),
+        files: [],
+        redactions: [],
+        blocked: false,
+        ...(addressed.repo ? { repos: [addressed.repo] } : {})
+      });
+      return;
+    }
     const scan = await scanRepository(root);
     const decision = decidePromptContext(event.prompt, scan.files, scan.coChange);
     if (!decision.inject) {
@@ -256,7 +273,8 @@ async function runHookCommand(): Promise<void> {
   if (!verdict.blocked) {
     // Secret rules passed; now the write scope across catalog repositories.
     const event = parseToolUse(raw);
-    const scoped = event && await evaluateWriteScope(event.tool, event.toolInput, event.cwd ?? process.cwd());
+    const scoped = event && (await evaluateWriteScope(event.tool, event.toolInput, event.cwd ?? process.cwd())
+      ?? await evaluateMessaging(event.tool, event.toolInput, event.cwd ?? process.cwd()));
     if (!scoped) {
       // Allowed: tell the repository map which repository the agent is in.
       if (event) {

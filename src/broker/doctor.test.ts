@@ -30,7 +30,7 @@ const HOOK = {
   hooks: {
     PreToolUse: [
       {
-        matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell',
+        matcher: 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|SendMessage',
         hooks: [{ type: 'command', command: 'node /repo/out/broker/cli.js hook' }]
       }
     ]
@@ -52,7 +52,7 @@ test('a tokio hook whose matcher misses a tool is a warning that names the tools
   const bashOnly = checkClaudeSettings(JSON.stringify(hookWithMatcher('Bash'))).find((check) => check.name === 'PreToolUse hook');
   assert.match(bashOnly?.detail ?? '', /Read, Edit, Write, MultiEdit, NotebookEdit, Grep, Glob, PowerShell/);
 
-  for (const matcher of ['Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell', '*', '', undefined]) {
+  for (const matcher of ['Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|SendMessage', '*', '', undefined]) {
     const covered = checkClaudeSettings(JSON.stringify(hookWithMatcher(matcher))).find((check) => check.name === 'PreToolUse hook');
     assert.equal(covered?.level, 'ok', String(matcher));
   }

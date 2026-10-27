@@ -147,7 +147,7 @@ test('init adds the scope file to .gitignore once, keeping existing lines', asyn
   const cliPath = join(root, 'cli.js');
   const first = await initProject({ root, cliPath });
   assert.equal(first.find((result) => result.path === '.gitignore')?.status, 'updated');
-  assert.equal(await readFile(join(root, '.gitignore'), 'utf8'), 'node_modules/\n.tokio/scope.json\n.tokio/layout.json\n');
+  assert.equal(await readFile(join(root, '.gitignore'), 'utf8'), 'node_modules/\n.tokio/scope.json\n.tokio/layout.json\n.tokio/messaging.json\n');
 
   const second = await initProject({ root, cliPath });
   assert.equal(second.find((result) => result.path === '.gitignore')?.status, 'unchanged');

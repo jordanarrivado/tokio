@@ -14,6 +14,8 @@ import { MAX_SCANNED_FILES } from './scan';
 import { formatFooter, formatStats, formatTokens, readAuditEntries, summarizeAudit } from './stats';
 import { detectValidationCommands } from '../context/project';
 import { findRelevantFiles, formatRoutePlan, planRoute } from '../context/routing';
+import { ASK_TIMEOUT_MS, buildAskPrompt, MAX_ANSWER_CHARS, parseAnswer, runAnswerAgent } from './ask';
+import { ownRepo, readConnections, resolveRepoName } from './messaging';
 
 export interface ToolDefinition {
   name: string;
@@ -58,11 +60,16 @@ const TOOL_TIMEOUT_MS = 10_000;
 const MAX_SYMBOL_HITS = 10;
 
 const CANCELLED: ToolOutcome = { text: 'Cancelled.', isError: true, ended: 'cancelled' };
-const TIMED_OUT: ToolOutcome = {
-  text: `Timed out after ${TOOL_TIMEOUT_MS / 1000}s. Narrow targetPath or the request.`,
+const timedOut = (timeoutMs: number, hint: string): ToolOutcome => ({
+  text: `Timed out after ${timeoutMs / 1000}s. ${hint}`,
   isError: true,
   ended: 'timeout'
+});
+/** ask_repo runs a whole agent, so it gets minutes instead of the seconds a local lookup gets. */
+const TIMEOUTS: Record<string, { ms: number; hint: string }> = {
+  ask_repo: { ms: ASK_TIMEOUT_MS, hint: 'Ask a narrower question.' }
 };
+const DEFAULT_TIMEOUT = { ms: TOOL_TIMEOUT_MS, hint: 'Narrow targetPath or the request.' };
 
 const TOOLS: readonly ToolDefinition[] = [
   {
@@ -158,6 +165,18 @@ const TOOLS: readonly ToolDefinition[] = [
     name: 'list_repositories',
     description: 'List the local repositories in this workspace: name, path, purpose, write target or read-only, and merge order.',
     inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'ask_repo',
+    description: 'Ask another catalog repository\'s agent a question and get its answer. Runs a read-only agent in that repository; takes up to 3 minutes. Use when a prompt starts with ~name: and you cannot SendMessage to an open session.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo: { type: 'string', description: 'Repository name, folder name, or one part of the name, such as api.' },
+        question: { type: 'string' }
+      },
+      required: ['repo', 'question']
+    }
   }
 ];
 
@@ -237,7 +256,8 @@ export class Broker {
         resolve(outcome);
       };
     });
-    const timer = setTimeout(() => stop(TIMED_OUT), TOOL_TIMEOUT_MS);
+    const timeout = TIMEOUTS[name] ?? DEFAULT_TIMEOUT;
+    const timer = setTimeout(() => stop(timedOut(timeout.ms, timeout.hint)), timeout.ms);
     const onCancel = (): void => stop(CANCELLED);
     cancel?.addEventListener('abort', onCancel, { once: true });
     try {
@@ -266,6 +286,8 @@ export class Broker {
         return this.findSymbol(args, signal);
       case 'list_repositories':
         return this.listRepositories(signal);
+      case 'ask_repo':
+        return this.askRepo(args, signal);
       default:
         // callTool rejects unknown names before dispatch; this only guards the switch.
         throw new Error(`Unknown tool: ${name}`);
@@ -523,6 +545,69 @@ export class Broker {
     const catalog = await loadCatalog(this.root, signal);
     const missing = await findMissingRepos(catalog);
     return { text: formatCatalog(catalog, missing), estimate: false };
+  }
+
+  /** Starts the answering agent. A field, so tests can run ask_repo without a real agent. */
+  runAgent = runAnswerAgent;
+
+  /**
+   * Relays a question to another repository's agent. The same messaging switch as SendMessage applies,
+   * so an agent without SendMessage gets no way around it.
+   */
+  private async askRepo(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
+    const name = requireString(args, 'repo');
+    const question = requireString(args, 'question').trim();
+    const catalog = await loadCatalog(this.root, signal);
+    const matches = resolveRepoName(catalog, name);
+    if (matches.length !== 1) {
+      const known = catalog.repos.map((repo) => repo.name).join(', ');
+      return {
+        text: matches.length === 0
+          ? `No repository is called "${name}". Repositories: ${known}.`
+          : `"${name}" matches ${matches.map((repo) => repo.name).join(', ')}. Pass the full name.`,
+        isError: true,
+        estimate: false
+      };
+    }
+    const [peer] = matches;
+    const own = ownRepo(catalog, this.root);
+    if (peer.name === own.name) {
+      return { text: `${peer.name} is this repository. Answer the question yourself.`, isError: true, estimate: false };
+    }
+    if (question === '') {
+      return { text: 'The question is empty.', isError: true, estimate: false };
+    }
+    if (!(await readConnections(own.path)).includes(peer.name)) {
+      return {
+        text: `Messaging with ${peer.name} is off. Ask the user to switch it on for ${peer.name} on the tokio repository map.`,
+        isError: true,
+        blocked: true,
+        estimate: false,
+        repos: [peer.name]
+      };
+    }
+    if ((await findMissingRepos(catalog)).has(peer.name)) {
+      return { text: `Repository folder not found: ${peer.path}.`, isError: true, estimate: false };
+    }
+
+    // The question is the user's own text, but it leaves this session, so it is redacted like a refined prompt.
+    const asked = redactSecrets(question);
+    const run = await this.runAgent(peer.path, buildAskPrompt(peer, own.name, asked.text), signal);
+    const answer = parseAnswer(run.stdout);
+    if (answer.isError && run.exitCode !== 0 && run.stderr.trim() !== '') {
+      answer.text = `${answer.text}\n${run.stderr.trim().slice(0, 500)}`;
+    }
+    const redacted = redactSecrets(answer.text);
+    const text = redacted.text.length > MAX_ANSWER_CHARS
+      ? `${redacted.text.slice(0, MAX_ANSWER_CHARS)}\n[Answer cut at ${MAX_ANSWER_CHARS} characters.]`
+      : redacted.text;
+    return {
+      text: `Answer from the ${peer.name} agent:\n\n${text}`,
+      isError: answer.isError,
+      redactions: [...asked.redactions, ...redacted.redactions],
+      estimate: false,
+      repos: [peer.name]
+    };
   }
 
   private storeOutput(text: string): string {

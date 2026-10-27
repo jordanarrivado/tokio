@@ -13,6 +13,12 @@ out/broker/**
 !out/broker/repos.js
 !out/broker/policy.js
 !out/broker/scan.js
+# The repository map shows agent activity from the audit and activity logs.
+!out/broker/activity.js
+!out/broker/audit.js
+!out/broker/stats.js
+# The map's messaging switch.
+!out/broker/messaging.js
 **/*.ts
 tsconfig.json
 package-lock.json

@@ -76,13 +76,15 @@ interface ClassifyRequest {
 
 type RepoAction =
   | 'list' | 'grant' | 'revoke' | 'clearGrants' | 'setDefault' | 'add' | 'remove'
-  | 'graph' | 'addDependency' | 'removeDependency' | 'addLink' | 'removeLink' | 'saveLayout' | 'pickFile' | 'openMap';
+  | 'graph' | 'addDependency' | 'removeDependency' | 'addLink' | 'removeLink' | 'saveLayout' | 'pickFile' | 'openMap'
+  | 'connect' | 'disconnect';
 const REPO_ACTIONS: readonly RepoAction[] = [
   'list', 'grant', 'revoke', 'clearGrants', 'setDefault', 'add', 'remove',
-  'graph', 'addDependency', 'removeDependency', 'addLink', 'removeLink', 'saveLayout', 'pickFile', 'openMap'
+  'graph', 'addDependency', 'removeDependency', 'addLink', 'removeLink', 'saveLayout', 'pickFile', 'openMap',
+  'connect', 'disconnect'
 ];
 /** Actions that name one repository. */
-const NAMED_REPO_ACTIONS: readonly RepoAction[] = ['grant', 'revoke', 'setDefault', 'remove', 'pickFile'];
+const NAMED_REPO_ACTIONS: readonly RepoAction[] = ['grant', 'revoke', 'setDefault', 'remove', 'pickFile', 'connect', 'disconnect'];
 /** Actions between two repositories or two `repo:path` file ends. */
 const PAIR_REPO_ACTIONS: readonly RepoAction[] = ['addDependency', 'removeDependency', 'addLink', 'removeLink'];
 const LINK_KIND_VALUES: readonly string[] = ['api', 'type', 'event', 'schema', 'config', 'other'];
@@ -279,6 +281,10 @@ async function useRepoCatalog(
         return result(true, `${name} is read-only again.`, await repoCatalog.revoke(name));
       case 'clearGrants':
         return result(true, 'Only the write target accepts edits.', await repoCatalog.clearGrants());
+      case 'connect':
+        return result(true, `Messaging with ${name} is on.`, await repoCatalog.setMessaging(name, true));
+      case 'disconnect':
+        return result(true, `Messaging with ${name} is off.`, await repoCatalog.setMessaging(name, false));
       case 'setDefault':
         return result(true, `${name} is now the write target.`, await repoCatalog.setDefault(name));
       case 'add': {

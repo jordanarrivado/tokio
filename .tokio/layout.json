@@ -10,18 +10,18 @@
       "y": 267
     },
     "hierpayroll-v3-web": {
-      "x": 254,
-      "y": 262
+      "x": 252,
+      "y": 268
     },
     "Hier-Run": {
-      "x": 519,
-      "y": 259
+      "x": 511,
+      "y": 265
     }
   },
   "settings": {
     "shape": "curved",
     "styles": {
-      "dependency": "solid",
+      "dependency": "dotted",
       "link": "dashed",
       "detected": "dotted"
     },

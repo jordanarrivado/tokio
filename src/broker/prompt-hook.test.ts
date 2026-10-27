@@ -129,11 +129,12 @@ test('CLI adds the map to stdout, audits it without the prompt text, and exits 0
   assert.equal(log.includes(prompt), false);
 });
 
-test('CLI fails open with no output for skipped, malformed, and missing-repository events', () => {
+test('CLI fails open with no output for skipped, malformed, and missing-repository events', async () => {
+  const empty = await scratchDirectory('tokio-prompt-hook-');
   const cases: string[] = [
-    JSON.stringify({ prompt: 'fix invoice', cwd: process.cwd() }),
+    JSON.stringify({ prompt: 'fix invoice', cwd: empty }),
     'not json',
-    JSON.stringify({ cwd: process.cwd() }),
+    JSON.stringify({ cwd: empty }),
     JSON.stringify({ prompt: 'Fix the invoice total rounding in the billing module', cwd: join(tmpdir(), 'tokio-missing-repo-does-not-exist') })
   ];
   for (const input of cases) {

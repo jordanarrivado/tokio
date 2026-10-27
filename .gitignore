@@ -3,6 +3,7 @@ out/
 *.vsix
 *.log
 *.tsbuildinfo
+.tokio/messaging.json
 
 .env
 .env.*

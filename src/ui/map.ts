@@ -13,7 +13,7 @@ import type { RepoCatalogService } from './repos';
 
 const MUTATING_ACTIONS = new Set([
   'grant', 'revoke', 'clearGrants', 'setDefault', 'add', 'remove',
-  'addDependency', 'removeDependency', 'addLink', 'removeLink'
+  'addDependency', 'removeDependency', 'addLink', 'removeLink', 'connect', 'disconnect'
 ]);
 
 /** How often the open map rereads the audit log to show which repository an agent is working in. */
@@ -127,7 +127,7 @@ function getMapHtml(cspSource: string): string {
       --warn: var(--vscode-editorWarning-foreground, #cca700);
       --danger: var(--vscode-errorForeground, #f48771);
       --active: var(--vscode-charts-orange, #d18616);
-      --edit: var(--vscode-charts-green, #89d185);
+      --edit: #a2e61b;
       --mono: var(--vscode-editor-font-family, monospace);
       --radius: 10px;
       --node-width: 230px;
@@ -262,6 +262,10 @@ function getMapHtml(cspSource: string): string {
     #edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; color: color-mix(in srgb, var(--text) 75%, transparent); }
     #edge-paths path { fill: none; stroke-width: 2; }
     #arrow path { fill: currentColor; stroke: none; }
+    /* A lit line's arrowhead matches its flow. */
+    #arrow-live path { fill: var(--active); stroke: none; }
+    #arrow-editing path { fill: var(--edit); stroke: none; }
+    #arrow-blocked path { fill: var(--danger); stroke: none; }
     #edges .dep { stroke: color-mix(in srgb, var(--text) 70%, transparent); }
     #edges .link { stroke: var(--accent-text); }
     /* Dash patterns come from the Lines settings, per connection kind. */
@@ -373,6 +377,43 @@ function getMapHtml(cspSource: string): string {
       font-size: 0.78em;
       line-height: 1.6;
     }
+    .node-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    button.msg-switch {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 1px 2px;
+      border: 0;
+      color: var(--muted);
+      background: transparent;
+      font-size: 0.74em;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    button.msg-switch:hover:not(:disabled) { background: transparent; color: var(--text); }
+    .msg-switch .track {
+      position: relative;
+      width: 26px;
+      height: 14px;
+      border: 1px solid var(--border-strong);
+      border-radius: 999px;
+      background: var(--field);
+      transition: background 120ms ease, border-color 120ms ease;
+    }
+    .msg-switch .track::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: transform 120ms ease, background 120ms ease;
+    }
+    .msg-switch[aria-checked="true"] { color: var(--ok); }
+    .msg-switch[aria-checked="true"] .track { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 25%, var(--field)); }
+    .msg-switch[aria-checked="true"] .track::after { transform: translateX(12px); background: var(--ok); }
     .node[data-access="write"] .chip { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent-text) 50%, transparent); background: color-mix(in srgb, var(--accent-text) 12%, transparent); }
     /* The port: drag it onto another node to record that this one depends on that one. */
     .port {
@@ -496,6 +537,15 @@ function getMapHtml(cspSource: string): string {
           <defs>
             <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path>
+            </marker>
+            <marker id="arrow-live" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z"></path>
+            </marker>
+            <marker id="arrow-editing" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z"></path>
+            </marker>
+            <marker id="arrow-blocked" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z"></path>
             </marker>
           </defs>
           <g id="edge-paths"></g>
@@ -843,7 +893,8 @@ function getMapHtml(cspSource: string): string {
           const kind = connection.links.length > 0 ? 'link' : connection.dependency ? 'dep' : 'detected';
           const style = settings.styles[kind === 'dep' ? 'dependency' : kind];
           const broken = missing.has(fromName) || missing.has(toName);
-          const flowing = !broken && (live(fromName) || live(toName));
+          // Work in the write target alone only lights its card; a line flows when the agent reaches the other end.
+          const flowing = !broken && [fromName, toName].some((name) => name !== graph.defaultRepo && live(name));
           const classes = [kind];
           if (selection && selection.type === 'edge' && selection.key === connection.key) classes.push('selected');
           if (broken) classes.push('missing');
@@ -864,11 +915,15 @@ function getMapHtml(cspSource: string): string {
             // Dots run along the line, from the depending repository toward the one it depends on.
             const flow = document.createElementNS(SVG, 'path');
             flow.setAttribute('d', route.d);
-            const ends = [fromName, toName].map((name) => activity[name]).filter(Boolean);
+            // Color by what the agent does at the far end; an edit in the write target says nothing about this line.
+            const ends = [fromName, toName].filter((name) => name !== graph.defaultRepo && live(name)).map((name) => activity[name]);
             const blocked = ends.some((entry) => entry.state === 'blocked');
             const editing = ends.some((entry) => entry.state === 'working' && entry.action === 'editing');
             flow.setAttribute('class', 'flow' + (blocked ? ' blocked' : editing ? ' editing' : ''));
             if (editing && !blocked) path.classList.add('editing');
+            if (connection.dependency) {
+              path.setAttribute('marker-end', 'url(#arrow-' + (blocked ? 'blocked' : editing ? 'editing' : 'live') + ')');
+            }
             edgePaths.appendChild(flow);
           }
           const start = route.mid;
@@ -925,7 +980,27 @@ function getMapHtml(cspSource: string): string {
           const chip = element('span', 'chip', state === 'write' ? 'write target' : state === 'granted' ? 'edits allowed' : state === 'missing' ? 'missing' : 'read-only');
           const port = element('span', 'port');
           port.title = 'Drag onto another repository: ' + repo.name + ' depends on it';
-          node.append(head, chip, element('span', 'activity'), port);
+          const row = element('div', 'node-row');
+          row.append(chip);
+          // This repository has no switch: the switch on each other card says whether its agent and ours may message.
+          if (typeof repo.messaging === 'boolean' && !repo.missing) {
+            const toggle = element('button', 'msg-switch');
+            toggle.type = 'button';
+            toggle.setAttribute('role', 'switch');
+            toggle.setAttribute('aria-checked', String(repo.messaging));
+            toggle.setAttribute('aria-label', 'Messaging with ' + repo.name);
+            toggle.title = repo.messaging
+              ? 'Agents here and in ' + repo.name + ' may message each other. Click to turn off.'
+              : 'Click to let agents here and in ' + repo.name + ' message each other.';
+            toggle.append(element('span', 'track'), element('span', '', repo.messaging ? 'ON' : 'OFF'));
+            toggle.addEventListener('pointerdown', (event) => event.stopPropagation());
+            toggle.addEventListener('click', (event) => {
+              event.stopPropagation();
+              mutate(repo.messaging ? 'disconnect' : 'connect', { name: repo.name });
+            });
+            row.append(toggle);
+          }
+          node.append(head, row, element('span', 'activity'), port);
           setNodeActivity(node, repo, state);
 
           head.addEventListener('pointerdown', (event) => startDrag(event, node, repo.name));

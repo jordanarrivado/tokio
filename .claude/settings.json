@@ -30,7 +30,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Edit|Write|MultiEdit|Grep|Glob|Bash|PowerShell",
+        "matcher": "Read|Edit|Write|MultiEdit|Grep|Glob|Bash|PowerShell|SendMessage",
         "hooks": [
           {
             "type": "command",

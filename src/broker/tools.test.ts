@@ -190,7 +190,7 @@ test('an unknown tool name returns an error listing the valid tools', async () =
   assert.equal(outcome.isError, true);
   assert.equal(
     outcome.text,
-    'Unknown tool: delete_everything. Valid tools: refine_task, repo_map, read_symbol, search_output, session_stats, route_task, find_symbol, list_repositories.'
+    'Unknown tool: delete_everything. Valid tools: refine_task, repo_map, read_symbol, search_output, session_stats, route_task, find_symbol, list_repositories, ask_repo.'
   );
 });
 
@@ -449,4 +449,80 @@ test('list_repositories ignores unknown input fields and obeys cancellation', as
   cancel.abort();
   const cancelled = await broker.callTool('list_repositories', {}, cancel.signal);
   assert.equal(cancelled.text, 'Cancelled.');
+});
+
+/** tokio, api, and web as sibling folders; messaging between them starts off. */
+async function createAskWorkspace(): Promise<{ root: string; api: string }> {
+  const parent = await mkdtemp(join(tmpdir(), 'tokio-ask-'));
+  const root = join(parent, 'tokio');
+  for (const folder of ['tokio', 'hierpayroll-v3-api', 'hierpayroll-v3-web']) {
+    await mkdir(join(parent, folder), { recursive: true });
+  }
+  await writeFile(join(root, 'tokio.repos.json'), JSON.stringify({
+    default: 'tokio',
+    repos: [
+      { name: 'tokio', path: '.' },
+      { name: 'hierpayroll-v3-api', path: '../hierpayroll-v3-api' },
+      { name: 'hierpayroll-v3-web', path: '../hierpayroll-v3-web' }
+    ]
+  }), 'utf8');
+  return { root, api: join(parent, 'hierpayroll-v3-api') };
+}
+
+/** A stand-in agent that records where it ran and what it was asked. */
+function fakeAgent(broker: Broker, stdout: string): { calls: { cwd: string; prompt: string }[] } {
+  const record = { calls: [] as { cwd: string; prompt: string }[] };
+  broker.runAgent = async (cwd: string, prompt: string) => {
+    record.calls.push({ cwd, prompt });
+    return { stdout, stderr: '', exitCode: 0 };
+  };
+  return record;
+}
+
+test('ask_repo is refused while messaging with the repository is off, and starts no agent', async () => {
+  const { root } = await createAskWorkspace();
+  const broker = new Broker(root);
+  const agent = fakeAgent(broker, '{}');
+  const outcome = await broker.callTool('ask_repo', { repo: 'api', question: 'why is this needed?' });
+  assert.equal(outcome.isError, true);
+  assert.equal(outcome.blocked, true);
+  assert.match(outcome.text, /Messaging with hierpayroll-v3-api is off/);
+  assert.equal(agent.calls.length, 0);
+});
+
+test('ask_repo runs the agent in the resolved repository and returns its redacted answer', async () => {
+  const { root, api } = await createAskWorkspace();
+  const { setConnection } = await import('./messaging');
+  await setConnection(root, 'hierpayroll-v3-api', true);
+  const broker = new Broker(root);
+  const agent = fakeAgent(broker, JSON.stringify({ type: 'result', is_error: false, result: 'It boots the queue. See config/queue.php:12. Key: AKIAABCDEFGHIJKLMNOP' }));
+  const outcome = await broker.callTool('ask_repo', { repo: 'API', question: 'why is the queue set up with AKIAABCDEFGHIJKLMNOP?' });
+
+  assert.equal(outcome.isError, false);
+  assert.equal(agent.calls.length, 1);
+  assert.equal(agent.calls[0].cwd, api);
+  assert.match(agent.calls[0].prompt, /You are the agent for the hierpayroll-v3-api repository\. The agent working in tokio asks/);
+  assert.doesNotMatch(agent.calls[0].prompt, /AKIAABCDEFGHIJKLMNOP/);
+  assert.match(outcome.text, /^Answer from the hierpayroll-v3-api agent:\n\nIt boots the queue\. See config\/queue\.php:12\./);
+  assert.doesNotMatch(outcome.text, /AKIAABCDEFGHIJKLMNOP/);
+
+  const [entry] = (await readAuditEntries(root)).filter((candidate) => candidate.tool === 'ask_repo');
+  assert.deepEqual(entry.repos, ['hierpayroll-v3-api']);
+  assert.equal(JSON.stringify(entry).includes('queue'), false);
+});
+
+test('ask_repo rejects unknown, ambiguous, and own repository names, and reports a failed agent run', async () => {
+  const { root } = await createAskWorkspace();
+  const { setConnection } = await import('./messaging');
+  await setConnection(root, 'hierpayroll-v3-api', true);
+  const broker = new Broker(root);
+  fakeAgent(broker, JSON.stringify({ type: 'result', is_error: true, result: 'Credit balance is too low' }));
+
+  assert.match((await broker.callTool('ask_repo', { repo: 'nope', question: 'q' })).text, /No repository is called "nope"/);
+  assert.match((await broker.callTool('ask_repo', { repo: 'hierpayroll', question: 'q' })).text, /matches hierpayroll-v3-api, hierpayroll-v3-web/);
+  assert.match((await broker.callTool('ask_repo', { repo: 'tokio', question: 'q' })).text, /is this repository/);
+  assert.equal((await broker.callTool('ask_repo', { repo: 'api', question: '' })).isError, true);
+  const failed = await broker.callTool('ask_repo', { repo: 'api', question: 'q' });
+  assert.equal(failed.isError, true);
+  assert.match(failed.text, /Credit balance is too low/);
 });

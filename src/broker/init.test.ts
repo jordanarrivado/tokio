@@ -48,14 +48,14 @@ test('creates the Claude Code and Codex configs and the guidance block in an emp
   assert.deepEqual(mcp.mcpServers.tokio, { command: 'node', args: [cli, 'mcp', '--root', toPosixPath(resolve(root))] });
 
   const settings = await readJson(join(root, '.claude', 'settings.json'));
-  assert.equal(settings.hooks.PreToolUse[0].matcher, 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell');
+  assert.equal(settings.hooks.PreToolUse[0].matcher, 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|SendMessage');
   assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, `node ${cli} hook`);
   assert.equal(settings.hooks.UserPromptSubmit[0].hooks[0].command, `node ${cli} prompt-hook`);
   assert.ok(settings.permissions.deny.includes('Read(.env)'));
   assert.ok(settings.permissions.deny.includes('Read(secrets/**)'));
 
   const codex = await readFile(join(root, '.codex', 'config.toml'), 'utf8');
-  assert.match(codex, /\[mcp_servers\.tokio\]\ncommand = "node"\nargs = \["[^"]+", "mcp", "--root", "[^"]+"\]\ncwd = "[^"]+"/);
+  assert.match(codex, /\[mcp_servers\.tokio\]\ncommand = "node"\nargs = \["[^"]+", "mcp", "--root", "[^"]+"\]\ncwd = "[^"]+"\ntool_timeout_sec = 200\n/);
   assert.ok(codex.includes(`"${cli}"`));
 
   const agents = await readFile(join(root, 'AGENTS.md'), 'utf8');
@@ -192,7 +192,7 @@ test('widens a tokio hook matcher that misses tools, only with force', async () 
   assert.equal((await readJson(join(root, '.claude', 'settings.json'))).hooks.PreToolUse[0].matcher, oldMatcher);
 
   await initProject({ root, cliPath: fakeCli(root), force: true });
-  assert.equal((await readJson(join(root, '.claude', 'settings.json'))).hooks.PreToolUse[0].matcher, `${oldMatcher}|NotebookEdit|PowerShell`);
+  assert.equal((await readJson(join(root, '.claude', 'settings.json'))).hooks.PreToolUse[0].matcher, `${oldMatcher}|NotebookEdit|PowerShell|SendMessage`);
 });
 
 test('leaves invalid JSON untouched and still configures the other files', async () => {
@@ -235,4 +235,20 @@ test('CLI init prints one line per file and exits 0 when nothing conflicts', asy
   const rerun = spawnSync(process.execPath, [CLI, 'init', '--root', root], { encoding: 'utf8' });
   assert.equal(rerun.status, 0);
   assert.match(rerun.stdout, /unchanged\s+\.mcp\.json/);
+});
+
+test('adds the ask_repo timeout to a Codex tokio table from before it, without force, and keeps other tables', async () => {
+  const root = await scratchDirectory();
+  const cli = toPosixPath(resolve(fakeCli(root)));
+  const rootPath = toPosixPath(resolve(root));
+  await mkdir(join(root, '.codex'), { recursive: true });
+  const old = `[mcp_servers.tokio]\ncommand = "node"\nargs = ["${cli}", "mcp", "--root", "${rootPath}"]\ncwd = "${rootPath}"\n\n[mcp_servers.tokio.tools.search_output]\napproval_mode = "approve"\n`;
+  await writeFile(join(root, '.codex', 'config.toml'), old, 'utf8');
+
+  const results = await initProject({ root, cliPath: fakeCli(root) });
+  assert.equal(statusOf(results, '.codex/config.toml'), 'updated');
+  const codex = await readFile(join(root, '.codex', 'config.toml'), 'utf8');
+  assert.ok(codex.includes(`cwd = "${rootPath}"\ntool_timeout_sec = 200\n`));
+  assert.ok(codex.includes('[mcp_servers.tokio.tools.search_output]\napproval_mode = "approve"'));
+  assert.equal(statusOf(await initProject({ root, cliPath: fakeCli(root) }), '.codex/config.toml'), 'unchanged');
 });
