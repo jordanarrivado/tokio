@@ -1,8 +1,13 @@
 {
   "mcpServers": {
     "tokio": {
-      "command": "node",
-      "args": ["D:/tokio/out/broker/cli.js", "mcp", "--root", "D:/tokio"]
+      "command": "C:/Program Files/nodejs/node.exe",
+      "args": [
+        "C:/projects/tokio/out/broker/cli.js",
+        "mcp",
+        "--root",
+        "C:/projects/tokio"
+      ]
     }
   }
 }

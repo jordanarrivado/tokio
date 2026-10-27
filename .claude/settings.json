@@ -21,7 +21,7 @@
       "Read(secrets)",
       "Read(secrets.*)",
       "Read(secrets/**)",
-      "Read(*.key)",
+      "Read(*.key)",  
       "Read(*.pem)",
       "Read(*.p12)",
       "Read(*.pfx)"
@@ -34,7 +34,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node D:/tokio/out/broker/cli.js hook"
+            "command": "node C:/projects/tokio/out/broker/cli.js hook"
           }
         ]
       }

@@ -1,10 +1,12 @@
 .vscode/**
 .git/**
+.worktrees/**
 src/**
 node_modules/**
 out/**/*.test.js
 out/**/*.test.js.map
 out/**/*.map
+# Include all compiled runtime modules: the UI imports broker code and its dependencies.
 out/broker/**
 # The panel's Workspace card and the repository map read the catalog and write scope, and the map
 # scans repositories for detected links.
