@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, cp, lstat, mkdir, mkdtemp, readFile, rm, rmdir, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -617,7 +617,8 @@ export async function disposeActiveWorkspaces(): Promise<void> {
  */
 export async function removeLinksOrStop(links: readonly string[], holder: string): Promise<void> {
   for (const link of links) {
-    await rmdir(link).catch(() => undefined);
+    // Windows junctions use rmdir; POSIX directory symlinks must be unlinked.
+    await (process.platform === 'win32' ? rmdir(link) : unlink(link)).catch(() => undefined);
     const remaining = await lstat(link).then(() => true, () => false);
     if (remaining) {
       throw new Error(
