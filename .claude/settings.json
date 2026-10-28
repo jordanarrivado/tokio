@@ -34,7 +34,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node C:/projects/tokio/out/broker/cli.js hook"
+            "command": "node D:/tokio/out/broker/cli.js hook"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node D:/tokio/out/broker/cli.js output-hook"
           }
         ]
       }

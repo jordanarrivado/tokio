@@ -13,6 +13,7 @@ const SERVER_VERSION: string = JSON.parse(readFileSync(join(__dirname, '..', '..
 const INSTRUCTIONS = [
   'Tokio reduces context. For a coding task: call refine_task once with the task text,',
   'then repo_map to find relevant files and line numbers, then read_symbol only for the bodies you need.',
+  'When the repository has an architecture map (.tokio/map.md), repo_map starts with the routes it matches: read those lines first.',
   'If you already know a name, find_symbol returns its path and line without a map.',
   'read_symbol returns only changed lines on repeat reads. search_output queries truncated results.',
   'For work across repositories, list_repositories shows each one, the write target, and the merge order;',
@@ -23,8 +24,11 @@ const INSTRUCTIONS = [
   'A prompt that starts with ~name:, as in "~api: why is this needed", is a question for that repository\'s agent:',
   'relay it that way instead of answering it yourself.',
   'Either way, the user must switch messaging on for that repository on the tokio map.',
-  'When you message another repository\'s agent, ask for feedback. When you receive one, reply with what you did,',
-  'what worked or did not, and what could be improved. Secret files are blocked.'
+  'When you message another repository\'s agent, ask for feedback once per task, in the first request,',
+  'and batch your findings into one message. Reply to a message only when you have an action, a decision, or a finding:',
+  'say what you did, what worked or did not, and what could be improved. Do not send confirmations or thanks,',
+  'and do not reply to a message that says no reply is needed. After 2 round trips on one topic, stop and summarize',
+  'for your user, who decides whether to continue. Secret files are blocked.'
 ].join(' ');
 
 const JSON_RPC_VERSION = '2.0';

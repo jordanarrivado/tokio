@@ -4,10 +4,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { parseArchitectureMap } from '../context/archmap';
 import type { RepoFile } from '../context/repomap';
 import { estimateTokens } from '../core/tokens';
 import { AUDIT_DIRECTORY, AUDIT_FILE } from './audit';
 import {
+  decideMapContext,
   decidePromptContext,
   parsePromptHookEvent,
   PROMPT_HOOK_BUDGET_TOKENS
@@ -142,4 +144,57 @@ test('CLI fails open with no output for skipped, malformed, and missing-reposito
     assert.equal(result.status, 0, `exit status for ${input}`);
     assert.equal(result.stdout, '', `stdout for ${input}`);
   }
+});
+
+test('reads the session id from the event when present', () => {
+  assert.deepEqual(
+    parsePromptHookEvent(JSON.stringify({ prompt: 'fix login', cwd: 'D:/app', session_id: 'abc' })),
+    { prompt: 'fix login', cwd: 'D:/app', sessionId: 'abc' }
+  );
+});
+
+test('CLI sends matching map areas once per session and sends nothing when a mapped repository matches no area', async () => {
+  const cwd = await scratchDirectory('tokio-prompt-map-');
+  await mkdir(join(cwd, 'src', 'billing'), { recursive: true });
+  await mkdir(join(cwd, '.tokio'), { recursive: true });
+  await writeFile(join(cwd, 'src', 'billing', 'invoice.ts'), FILES[0].content, 'utf8');
+  await writeFile(join(cwd, '.tokio', 'map.md'), [
+    '## Billing',
+    'Keywords: invoice, total, rounding',
+    '- POST /api/invoices -> src/billing/invoice.ts#createInvoice',
+    '- Related: src/billing/gone.ts'
+  ].join('\n'), 'utf8');
+  const run = (prompt: string, session: string): string => spawnSync(process.execPath, [CLI, 'prompt-hook'], {
+    input: JSON.stringify({ hook_event_name: 'UserPromptSubmit', prompt, cwd, session_id: session }),
+    encoding: 'utf8'
+  }).stdout;
+
+  const first = run('Fix the invoice total rounding in the billing module', 's1');
+  assert.match(first, /^Architecture map: Billing\./);
+  assert.match(first, /- src\/billing\/invoice\.ts:3-5 createInvoice \(POST \/api\/invoices\)/);
+  assert.match(first, /Billing: no file or folder at src\/billing\/gone\.ts/);
+  assert.doesNotMatch(first, /Repository map:/);
+
+  assert.equal(run('Invoice rounding still wrong for the total', 's1').trim(),
+    'Architecture map areas already sent in this session: Billing. Reuse those lines.');
+  assert.match(run('Invoice rounding still wrong for the total', 's2'), /^Architecture map: Billing\./);
+  // The keyword-ranked repository map is only for repositories without a map.
+  assert.equal(run('Rename the customer field returned for each customer', 's1'), '');
+  assert.equal(run('<cross-session-message from="x">Invoice rounding is fixed for the total</cross-session-message>', 's3'), '');
+
+  const log = await readFile(join(cwd, AUDIT_DIRECTORY, AUDIT_FILE), 'utf8');
+  assert.equal(log.includes('rounding'), false);
+  assert.match(log, /"tool":"prompt-map"/);
+});
+
+test('a prompt addressed to another repository with ~name gets no map context', () => {
+  const areas = parseArchitectureMap('## Login and sessions\nKeywords: login, session\n- POST /api/login -> src/login.ts#login\n');
+  assert.equal(decideMapContext('fix the login session timeout please', areas, new Set()).use, true);
+  assert.equal(decideMapContext('can you ask ~api to fix the login session timeout', areas, new Set()).use, false);
+  assert.equal(decideMapContext('~api: why does the login session time out', areas, new Set()).use, false);
+  const files = [{ path: 'src/login.ts', content: 'export function login() { session(); }\n' }];
+  assert.equal(decidePromptContext('can you ask ~api to fix the login session timeout', files).inject, false);
+  const peer = '<cross-session-message from="api">The login session timeout is fixed</cross-session-message>';
+  assert.equal(decideMapContext(peer, areas, new Set()).use, false);
+  assert.equal(decidePromptContext(peer, files).inject, false);
 });

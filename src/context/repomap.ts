@@ -34,6 +34,8 @@ export interface RepoMapOptions {
   preferPrefix?: string;
   /** How a path is shown in the map. Defaults to the path itself. */
   formatPath?: (path: string) => string;
+  /** Files named elsewhere, such as by an architecture map. Each ranks like the target path. */
+  pinnedPaths?: readonly string[];
 }
 
 export interface RepoMap {
@@ -77,7 +79,8 @@ const SYMBOL_RULES: readonly { extensions: readonly string[]; pattern: RegExp }[
 export function buildRepoMap(files: readonly RepoFile[], options: RepoMapOptions): RepoMap {
   const known = new Set(files.map((file) => file.path));
   const targetPath = options.targetPath ? normalizePath(options.targetPath) : undefined;
-  const seeds = seedWeights(files, extractSearchTerms(options.task), targetPath);
+  const pinned = new Set([...(targetPath ? [targetPath] : []), ...(options.pinnedPaths ?? []).map(normalizePath)]);
+  const seeds = seedWeights(files, extractSearchTerms(options.task), pinned);
   const ranks = rankFiles(
     files,
     withCoChangeEdges(options.edges ?? buildImportEdges(files, known), options.coChange, known),
@@ -254,13 +257,13 @@ function withCoChangeEdges(
 function seedWeights(
   files: readonly RepoFile[],
   terms: readonly string[],
-  targetPath: string | undefined
+  pinned: ReadonlySet<string>
 ): Map<string, number> {
   const seeds = new Map<string, number>();
   for (const file of files) {
     const path = normalizePath(file.path);
     const contentHits = Math.min(countTermHits(file.content, terms) * CONTENT_HIT_WEIGHT, MAX_CONTENT_SEED_WEIGHT);
-    seeds.set(path, (path === targetPath ? TARGET_SEED_WEIGHT : 0)
+    seeds.set(path, (pinned.has(path) ? TARGET_SEED_WEIGHT : 0)
       + countTermHits(path, terms) * PATH_HIT_WEIGHT
       + contentHits);
   }

@@ -1,0 +1,49 @@
+{
+  "sessions": [
+    {
+      "id": "d9a759bb-27c7-4a7a-873e-95ce85ad6fc2",
+      "areas": [
+        "Messaging between repository agents",
+        "Project setup and health checks",
+        "Repository map view (graph editor)"
+      ],
+      "at": "2026-10-28T08:53:18.602Z"
+    },
+    {
+      "id": "ae0203fc-d25a-404a-b421-59dc05c24ef9",
+      "areas": [
+        "Messaging between repository agents",
+        "Project setup and health checks",
+        "Benchmark",
+        "Repository map and ranking",
+        "Architecture map",
+        "Secret protection and tool policy (PreToolUse)",
+        "Prompt hook (UserPromptSubmit)",
+        "MCP server and agent tools",
+        "Multiple repositories (catalog)",
+        "Data structures and types"
+      ],
+      "at": "2026-10-28T06:47:03.056Z"
+    },
+    {
+      "id": "9d0a2927-cc4f-48e2-b193-679e89c59949",
+      "areas": [
+        "Architecture map",
+        "MCP server and agent tools",
+        "Repository map view (graph editor)"
+      ],
+      "at": "2026-10-28T03:50:36.109Z"
+    },
+    {
+      "id": "a931b16d-a3b1-4563-a779-2e7f4588de40",
+      "areas": [
+        "Auth",
+        "Employee data",
+        "Prompt hook (UserPromptSubmit)",
+        "Architecture map",
+        "MCP server and agent tools"
+      ],
+      "at": "2026-10-28T03:47:04.088Z"
+    }
+  ]
+}

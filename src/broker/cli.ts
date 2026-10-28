@@ -3,18 +3,22 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { refinePrompt } from '../core/refine';
 import { estimateTokens } from '../core/tokens';
 import type { AgentCommand } from './bench';
-import { formatBenchSummary, parseBenchTasks, runBench } from './bench';
-import { buildRepoMap } from '../context/repomap';
+import { checkBenchTasks, disposeActiveWorkspaces, formatBenchSummary, formatLiveSummary, parseBenchTasks, runBench } from './bench';
+import { buildRepoMap, type RepoFile } from '../context/repomap';
 import { recordToolActivity } from './activity';
 import { appendAuditEntry } from './audit';
 import { evaluateToolUse, parseToolUse } from './hook';
+import { compactCommandOutput, formatCompactFooter, saveOutput } from './compact';
 import { loadCatalog } from './catalog';
 import { clearScope, DEFAULT_GRANT_HOURS, evaluateWriteScope, formatScope, grantScope, readGrants } from './scope';
 import { scanRepository } from './scan';
 import { serveStdio } from './mcp';
 import { formatStats, readAuditEntries, summarizeAudit } from './stats';
-import { decidePromptContext, parsePromptHookEvent } from './prompt-hook';
+import { decideMapContext, decidePromptContext, formatMapContext, parsePromptHookEvent } from './prompt-hook';
+import { loadArchitectureMap, readSessionAreas, recordSessionAreas, resolveAgainstRepo, type LoadedMap } from './mapfile';
 import { initProject } from './init';
+import { formatMapCheck, MAP_PROMPTS_PATH, parseMapPrompts, runMapPrompts } from './mapcheck';
+import { resolveRepoPath } from './policy';
 import { addressedPromptContext, evaluateMessaging } from './messaging';
 import { runDoctor } from './doctor';
 import { Broker } from './tools';
@@ -30,9 +34,12 @@ const USAGE = [
   '  tokio mcp [--root <dir>]                       serve broker tools over stdio (MCP)',
   '  tokio hook                                     PreToolUse hook: reads event JSON on stdin',
   '  tokio map <task> [--root <dir>] [--target <path>] [--budget <tokens>]',
+  '  tokio map check [--root <dir>] [--prompts <file>] [--verbose]   check map entries and the areas sample prompts match',
   '  tokio stats [--root <dir>] [--since <YYYY-MM-DD>]   estimated usage from the audit log',
-  '  tokio bench <tasks.json> [--agent claude] [--repeat <n>] [--out <report.json>] [--working-tree]',
-  '  tokio prompt-hook                              UserPromptSubmit hook: adds a repo map for matching prompts',
+  '  tokio bench <tasks.json> [--mode prompt|live] [--agent claude] [--repeat <n>] [--out <report.json>] [--working-tree]',
+  '              [--share <folder>]... [--copy <file>]... [--check]',
+  '  tokio output-hook                              PostToolUse hook: compacts long test, build, and install output',
+  '  tokio prompt-hook                              UserPromptSubmit hook: adds map routes or a repo map for matching prompts',
   '  tokio init [--root <dir>] [--force] [--dry-run]  set up Claude Code and Codex configs for a project',
   '  tokio doctor [--root <dir>]                    check a project\'s Tokio setup (read-only)',
   '  tokio scope [<repo>...] [--hours <n>] [--clear] [--root <dir>]  show or grant write on catalog repositories'
@@ -55,6 +62,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'hook') {
     await runHookCommand();
+    return;
+  }
+  if (command === 'output-hook') {
+    await runOutputHookCommand();
     return;
   }
   if (command === 'prompt-hook') {
@@ -90,12 +101,37 @@ async function runBenchCommand(args: string[]): Promise<void> {
     throw new Error(`Unknown agent "${options.agentName}". Supported: ${Object.keys(AGENTS).join(', ')}.`);
   }
 
+  // Ctrl+C removes the open workspace's links before its folder, so a stopped bench never deletes shared folders.
+  process.once('SIGINT', () => {
+    process.stderr.write('Stopping: cleaning up the open workspace...\n');
+    void disposeActiveWorkspaces().finally(() => process.exit(130));
+  });
+  // node_modules is always shared; --share adds folders such as vendor.
+  const shared = ['node_modules', ...options.shared];
+  // Progress goes to stderr, so stdout keeps only the results.
+  const onProgress = (line: string): void => {
+    process.stderr.write(`${new Date().toLocaleTimeString()} ${line}\n`);
+  };
+  if (options.check) {
+    const results = await checkBenchTasks({ tasks, root: process.cwd(), shared, copyFiles: options.copyFiles, onProgress });
+    for (const result of results) {
+      process.stdout.write(`${result.ok ? 'ok  ' : 'FAIL'} ${result.taskId}: ${result.detail}\n`);
+    }
+    process.exitCode = results.every((result) => result.ok) ? 0 : 1;
+    return;
+  }
+
   const report = await runBench({
     tasks,
     agent,
     root: process.cwd(),
     workspaceSource: options.workspaceSource,
-    repeats: options.repeats,
+    // Live runs vary from run to run, so they default to three repeats to report a median.
+    repeats: options.repeats ?? (options.mode === 'live' ? 3 : 1),
+    mode: options.mode,
+    shared,
+    copyFiles: options.copyFiles,
+    onProgress,
     // Tokio arm: refined prompt plus the repo map, so the comparison covers scope and context.
     // This is a proxy for the MCP flow, where the agent pulls the same context on demand.
     buildTokioPrompt: async (task, workspace) => {
@@ -110,9 +146,16 @@ async function runBenchCommand(args: string[]): Promise<void> {
     await writeFile(options.outPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
   }
   process.stdout.write(`${formatBenchSummary(report.summary)}\n`);
+  if (report.tasks) {
+    process.stdout.write(`${formatLiveSummary(report.tasks)}\n`);
+  }
 }
 
 async function runMapCommand(args: string[]): Promise<void> {
+  if (args[0] === 'check') {
+    await runMapCheckCommand(args.slice(1));
+    return;
+  }
   let task: string | undefined;
   let root = process.cwd();
   let targetPath: string | undefined;
@@ -149,6 +192,57 @@ async function runMapCommand(args: string[]): Promise<void> {
 
   process.stdout.write(`${map.text}\n`);
   process.stdout.write(`\n[${map.tokens} tokens, ${map.files.length} files${notes.length ? `; ${notes.join(' ')}` : ''}]\n`);
+}
+
+/**
+ * Checks the architecture map: every entry must resolve, and each sample prompt must match exactly its expected
+ * areas. Exits 1 on any stale entry or failing prompt, so it can run in CI after a map edit.
+ */
+async function runMapCheckCommand(args: string[]): Promise<void> {
+  let root = process.cwd();
+  let promptsPath: string | undefined;
+  let verbose = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === '--verbose') {
+      verbose = true;
+    } else if (value === '--root') {
+      root = requireValue(args, ++index, value);
+    } else if (value === '--prompts') {
+      promptsPath = requireValue(args, ++index, value);
+    } else {
+      throw new Error(`Unknown option ${value}.
+${USAGE}`);
+    }
+  }
+
+  const map = await loadArchitectureMap(root);
+  if (!map) {
+    throw new Error('No .tokio/map.md in this repository. Create one from the Tokio panel or by hand.');
+  }
+  const all = map.areas.map((area) => ({ area, score: 0 }));
+  const routing = await resolveAgainstRepo(all, [], { root }, '');
+
+  let promptsText: string | undefined;
+  try {
+    promptsText = await readFile((await resolveRepoPath(root, promptsPath ?? MAP_PROMPTS_PATH)).absolute, 'utf8');
+  } catch (error) {
+    // The default prompts file is optional; one named with --prompts must exist.
+    if (promptsPath !== undefined) {
+      throw error;
+    }
+  }
+  const cases = promptsText === undefined ? undefined : parseMapPrompts(promptsText, map.areas);
+  const results = cases && runMapPrompts(map.areas, cases);
+  const report = formatMapCheck({
+    path: map.path,
+    areas: map.areas.length,
+    routes: map.areas.reduce((sum, area) => sum + area.routes.length, 0),
+    stale: routing.stale,
+    areaNames: map.areas.map((area) => area.name)
+  }, results, { verbose, cases });
+  process.stdout.write(`${report.text}\n`);
+  process.exitCode = report.ok ? 0 : 1;
 }
 
 async function runStatsCommand(args: string[]): Promise<void> {
@@ -247,6 +341,10 @@ async function runPromptHookCommand(): Promise<void> {
       return;
     }
     const scan = await scanRepository(root);
+    // A repository with a map gets map context or nothing: the keyword-ranked repository map only adds noise there.
+    if (await injectMapContext(root, event.prompt, event.sessionId, scan.files) !== 'no-map') {
+      return;
+    }
     const decision = decidePromptContext(event.prompt, scan.files, scan.coChange);
     if (!decision.inject) {
       return;
@@ -264,6 +362,50 @@ async function runPromptHookCommand(): Promise<void> {
   } catch {
     // Fail open: a missing or unreadable repository must not block the prompt.
   }
+}
+
+/**
+ * Sends the architecture map's matching areas instead of a repository map. Each area's lines go out once per
+ * session; later matches only name it. True when the map matched, so the caller adds nothing else.
+ */
+async function injectMapContext(
+  root: string,
+  prompt: string,
+  sessionId: string | undefined,
+  files: readonly RepoFile[]
+): Promise<'sent' | 'no-match' | 'no-map'> {
+  let map: LoadedMap | undefined;
+  try {
+    map = await loadArchitectureMap(root);
+  } catch {
+    // An unreadable map falls back to the repository map.
+    return 'no-map';
+  }
+  if (!map || map.areas.length === 0) {
+    return 'no-map';
+  }
+  const sent = sessionId ? await readSessionAreas(root, sessionId) : new Set<string>();
+  const decision = decideMapContext(prompt, map.areas, sent);
+  if (!decision.use) {
+    return 'no-match';
+  }
+  const routing = decision.fresh.length > 0
+    ? await resolveAgainstRepo(decision.fresh, files, { root }, prompt)
+    : undefined;
+  const { text, redactions } = formatMapContext(routing, decision.repeated);
+  process.stdout.write(`${text}\n`);
+  if (sessionId && routing) {
+    await recordSessionAreas(root, sessionId, routing.areas);
+  }
+  await appendAuditEntry(root, {
+    tool: 'prompt-map',
+    inputTokens: 0,
+    outputTokens: estimateTokens(text),
+    files: [...new Set(routing?.anchors.map((anchor) => anchor.path) ?? [])],
+    redactions,
+    blocked: false
+  });
+  return 'sent';
 }
 
 /** Claude Code sends the tool event on stdin. Exit code 2 blocks the call and shows stderr to the agent. */
@@ -302,6 +444,65 @@ async function runHookCommand(): Promise<void> {
   process.exitCode = 2;
 }
 
+/**
+ * PostToolUse hook for Bash and PowerShell. Replaces long test, build, and install output with the lines
+ * that matter and saves the full output for search_output. Every failure leaves the original output in place.
+ */
+async function runOutputHookCommand(): Promise<void> {
+  try {
+    const raw = await readStdin();
+    const event = parseToolUse(raw);
+    const response = parseToolResponse(raw);
+    const command = event?.toolInput.command;
+    if (!event || !response || typeof command !== 'string') {
+      return;
+    }
+    const compacted = compactCommandOutput(command, response.stdout, response.stderr);
+    if (!compacted) {
+      return;
+    }
+    const id = await saveOutput(compacted.full);
+    const stdout = `${compacted.stdout}\n${formatCompactFooter(compacted, id)}`;
+    process.stdout.write(JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        updatedToolOutput: { ...response.raw, stdout, stderr: compacted.stderr }
+      }
+    }));
+    const returned = estimateTokens(stdout) + estimateTokens(compacted.stderr);
+    await appendAuditEntry(event.cwd ?? process.cwd(), {
+      tool: 'output-hook',
+      inputTokens: 0,
+      outputTokens: returned,
+      files: [],
+      redactions: compacted.redactions,
+      blocked: false,
+      baselineTokens: compacted.baselineTokens,
+      savedTokens: compacted.baselineTokens - returned
+    }).catch(() => undefined);
+  } catch {
+    // Compaction is an optimization; the agent keeps the original output.
+  }
+}
+
+/** The Bash tool_response of a PostToolUse event, or undefined when it has no string stdout. */
+function parseToolResponse(raw: string): { stdout: string; stderr: string; raw: Record<string, unknown> } | undefined {
+  try {
+    const input: unknown = JSON.parse(raw.replace(/^﻿/, ''));
+    const response = typeof input === 'object' && input !== null ? (input as Record<string, unknown>).tool_response : undefined;
+    if (typeof response !== 'object' || response === null || Array.isArray(response)) {
+      return undefined;
+    }
+    const record = response as Record<string, unknown>;
+    if (typeof record.stdout !== 'string') {
+      return undefined;
+    }
+    return { stdout: record.stdout, stderr: typeof record.stderr === 'string' ? record.stderr : '', raw: record };
+  } catch {
+    return undefined;
+  }
+}
+
 function readStdin(): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
@@ -322,19 +523,39 @@ function parseRootArg(args: string[]): string {
 function parseBenchArgs(args: string[]): {
   file: string;
   agentName: string;
-  repeats: number;
+  repeats?: number;
   outPath?: string;
   workspaceSource: 'head' | 'working-tree';
+  mode: 'prompt' | 'live';
+  shared: string[];
+  copyFiles: string[];
+  check: boolean;
 } {
   let file: string | undefined;
   let agentName = 'claude';
-  let repeats = 1;
+  let repeats: number | undefined;
+  let mode: 'prompt' | 'live' = 'prompt';
+  const shared: string[] = [];
+  const copyFiles: string[] = [];
+  let check = false;
   let outPath: string | undefined;
   let workspaceSource: 'head' | 'working-tree' = 'head';
 
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
-    if (value === '--agent') {
+    if (value === '--mode') {
+      const chosen = requireValue(args, ++index, value);
+      if (chosen !== 'prompt' && chosen !== 'live') {
+        throw new Error('--mode must be prompt or live.');
+      }
+      mode = chosen;
+    } else if (value === '--share') {
+      shared.push(requireValue(args, ++index, value));
+    } else if (value === '--copy') {
+      copyFiles.push(requireValue(args, ++index, value));
+    } else if (value === '--check') {
+      check = true;
+    } else if (value === '--agent') {
       agentName = requireValue(args, ++index, value);
     } else if (value === '--working-tree') {
       workspaceSource = 'working-tree';
@@ -355,7 +576,7 @@ function parseBenchArgs(args: string[]): {
   if (!file) {
     throw new Error(`Missing tasks file.\n${USAGE}`);
   }
-  return { file, agentName, repeats, outPath, workspaceSource };
+  return { file, agentName, repeats, outPath, workspaceSource, mode, shared, copyFiles, check };
 }
 
 function requireValue(args: string[], index: number, flag: string): string {

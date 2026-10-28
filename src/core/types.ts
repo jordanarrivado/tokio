@@ -33,6 +33,10 @@ export interface RepositoryContext {
   conventionFiles?: string[];
   /** Real validation commands detected from project manifests. */
   validationCommands?: string[];
+  /** Files and line ranges an attached architecture map routes the task to, best first. */
+  mapRoutes?: string[];
+  /** Architecture map entries whose file or symbol no longer exists. */
+  mapStale?: string[];
 }
 
 export interface ContextPreview extends RepositoryContext {

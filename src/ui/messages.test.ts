@@ -331,3 +331,65 @@ function editorTools(overrides: Partial<EditorTools> = {}): EditorTools {
     ...overrides
   };
 }
+
+test('a refine adds the workspace map routes from the context scanner', async () => {
+  const seen: unknown[] = [];
+  const response = await handleWebviewRequest({
+    type: 'refine',
+    requestId: 7,
+    rawPrompt: 'Login fails after the token expires.',
+    targetPath: '',
+    mode: 'adaptive'
+  }, unusedClipboard(), {
+    scan: () => Promise.reject(new Error('not used')),
+    routeMap: async (input) => {
+      seen.push(input);
+      return { areas: ['Auth'], routes: ['src/auth/login.ts:3-5 handleLogin (POST /api/login)'], stale: [] };
+    }
+  });
+
+  assert.deepEqual(seen, [{ rawPrompt: 'Login fails after the token expires.' }]);
+  assert.equal(response?.type, 'refineResult');
+  assert.match(response?.type === 'refineResult' ? response.refinedPrompt : '', /src\/auth\/login\.ts:3-5 handleLogin/);
+});
+
+test('a missing or unreadable map never blocks a refine', async () => {
+  for (const routeMap of [async () => undefined, () => Promise.reject(new Error('map too large'))]) {
+    const response = await handleWebviewRequest({
+      type: 'refine',
+      requestId: 8,
+      rawPrompt: 'Fix login.',
+      targetPath: '',
+      mode: 'adaptive'
+    }, unusedClipboard(), { scan: () => Promise.reject(new Error('not used')), routeMap });
+
+    assert.equal(response?.type, 'refineResult');
+    assert.doesNotMatch(response?.type === 'refineResult' ? response.refinedPrompt : '', /Architecture map/);
+  }
+});
+
+test('mapStatus returns the scanner status, or an unavailable status without a scanner', async () => {
+  const status = { path: '.tokio/map.md', exists: true, areas: 2, routes: 5, stale: ['Auth: x not found'] };
+  assert.deepEqual(
+    await handleWebviewRequest({ type: 'mapStatus', requestId: 3 }, unusedClipboard(), {
+      scan: () => Promise.reject(new Error('not used')),
+      mapStatus: async () => status
+    }),
+    { type: 'mapStatusResult', requestId: 3, status }
+  );
+  const fallback = await handleWebviewRequest({ type: 'mapStatus', requestId: 4 }, unusedClipboard());
+  assert.equal(fallback?.type === 'mapStatusResult' && fallback.status.exists, false);
+});
+
+test('the webview cannot send map routes itself', async () => {
+  const response = await handleWebviewRequest({
+    type: 'refine',
+    requestId: 9,
+    rawPrompt: 'Fix login.',
+    targetPath: '',
+    mode: 'adaptive',
+    repositoryContext: { scope: 'targeted', files: [], mapRoutes: ['injected'] }
+  }, unusedClipboard());
+
+  assert.equal(response, undefined);
+});

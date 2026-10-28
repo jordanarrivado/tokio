@@ -1,16 +1,20 @@
 import { strict as assert } from 'node:assert';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { promisify } from 'node:util';
 import {
+  checkBenchTasks,
   formatBenchSummary,
+  formatLiveSummary,
+  liveArmArgs,
   parseAgentUsage,
   createCopyWorkspace,
   parseBenchTasks,
+  removeLinksOrStop,
   runBench,
   summarizeRuns
 } from './bench';
@@ -336,4 +340,181 @@ test('explains that verify needs a git repository with a commit', async () => {
     }),
     /need a git repository with at least one commit/
   );
+});
+
+test('live arm flags: off has no MCP servers and no hooks, on has the Tokio server and hooks; both deny secret reads', async () => {
+  const directory = await scratchDirectory('tokio-live-args-');
+  const off = await liveArmArgs('raw', 'D:\\tokio\\out\\broker\\cli.js', 'C:\\work\\run', directory);
+  const on = await liveArmArgs('tokio', 'D:\\tokio\\out\\broker\\cli.js', 'C:\\work\\run', directory);
+  const config = async (args: string[], flag: string) => JSON.parse(await readFile(args[args.indexOf(flag) + 1], 'utf8'));
+
+  for (const args of [off, on]) {
+    assert.ok(args.includes('--strict-mcp-config'));
+    assert.deepEqual(args.slice(args.indexOf('--permission-mode'), args.indexOf('--permission-mode') + 2), ['--permission-mode', 'acceptEdits']);
+    assert.ok((await config(args, '--settings')).permissions.deny.includes('Read(.env)'));
+  }
+  assert.deepEqual(await config(off, '--mcp-config'), { mcpServers: {} });
+  assert.equal((await config(off, '--settings')).disableAllHooks, true);
+  assert.equal(off.includes('--allowedTools'), false);
+
+  assert.deepEqual((await config(on, '--mcp-config')).mcpServers.tokio.args, ['D:/tokio/out/broker/cli.js', 'mcp', '--root', 'C:/work/run']);
+  const hooks = (await config(on, '--settings')).hooks;
+  assert.equal(hooks.PreToolUse[0].hooks[0].command, 'node D:/tokio/out/broker/cli.js hook');
+  assert.equal(hooks.PostToolUse[0].hooks[0].command, 'node D:/tokio/out/broker/cli.js output-hook');
+  assert.equal(hooks.UserPromptSubmit[0].hooks[0].command, 'node D:/tokio/out/broker/cli.js prompt-hook');
+  assert.deepEqual(on.slice(on.indexOf('--allowedTools'), on.indexOf('--allowedTools') + 2), ['--allowedTools', 'mcp__tokio']);
+});
+
+// Stands in for a live agent: the Tokio arm (given --allowedTools) writes an audit line, as the Tokio hooks would,
+// and reports fewer input tokens than the other arm so the medians differ.
+const LIVE_AGENT = `
+const fs = require('node:fs');
+const on = process.argv.includes('--allowedTools');
+if (on) {
+  fs.mkdirSync('.tokio', { recursive: true });
+  fs.appendFileSync('.tokio/audit.log', JSON.stringify({ tool: 'read_symbol' }) + '\\n');
+}
+let input = '';
+process.stdin.on('data', (chunk) => { input += chunk; });
+process.stdin.on('end', () => {
+  console.log(JSON.stringify({
+    type: 'result', is_error: false, num_turns: 1, duration_ms: 5, total_cost_usd: 0.001,
+    usage: { input_tokens: on ? 50 : 100, output_tokens: input.length, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+  }));
+});
+`;
+
+test('live mode sends the same task text to both arms, runs each in a workspace, and reports medians and Tokio calls', async () => {
+  const directory = await scratchDirectory('tokio-live-');
+  const scriptPath = join(directory, 'live-agent.js');
+  await writeFile(scriptPath, LIVE_AGENT, 'utf8');
+  const root = await makeRepo();
+  await mkdir(join(root, '.tokio'), { recursive: true });
+  await writeFile(join(root, '.tokio', 'map.md'), '## Auth\n- login -> README.md\n', 'utf8');
+
+  const report = await runBench({
+    tasks: [{ id: 'login', task: 'fix the login redirect' }],
+    agent: { command: process.execPath, args: [scriptPath] },
+    buildTokioPrompt: async () => 'never used in live mode',
+    root,
+    mode: 'live',
+    repeats: 3
+  });
+
+  assert.equal(report.mode, 'live');
+  assert.equal(report.runs.length, 6);
+  assert.ok(report.runs.every((run) => run.promptTokens === report.runs[0].promptTokens));
+  assert.ok(report.runs.filter((run) => run.arm === 'tokio').every((run) => run.tokioCalls?.read_symbol === 1));
+  assert.ok(report.runs.filter((run) => run.arm === 'raw').every((run) => run.tokioCalls === undefined));
+  const [task] = report.tasks ?? [];
+  const textLength = 'fix the login redirect'.length;
+  assert.equal(task.raw.medianBillable, 100 + textLength);
+  assert.equal(task.tokio.medianBillable, 50 + textLength);
+  assert.equal(task.ratio, Math.round(((50 + textLength) / (100 + textLength)) * 1000) / 1000);
+  assert.match(formatLiveSummary(report.tasks ?? []), /login: off median 122 \(122-122\) passed 0\/3 \| on median 72 \(72-72\) passed 0\/3 \| ratio 0\.59/);
+  // The agent edited only throwaway workspaces.
+  assert.equal(existsSync(join(root, '.tokio', 'audit.log')), false);
+  assert.equal(await worktreeCount(root), 1);
+});
+
+/** A repository whose last commit fixes a bug and adds the test that checks the fix. */
+async function makeFixRepo(): Promise<{ root: string; fix: string }> {
+  const root = await makeRepo();
+  const commit = async (message: string) => {
+    await execFileAsync('git', ['-C', root, 'add', '.']);
+    await execFileAsync('git', ['-C', root, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '-m', message]);
+  };
+  await writeFile(join(root, 'app.txt'), 'broken\n', 'utf8');
+  await commit('bug');
+  await writeFile(join(root, 'app.txt'), 'fixed\n', 'utf8');
+  await mkdir(join(root, 'tests'), { recursive: true });
+  await writeFile(join(root, 'tests', 'check.js'), "process.exit(require('fs').readFileSync('app.txt', 'utf8').trim() === 'fixed' ? 0 : 1);\n", 'utf8');
+  await commit('fix');
+  const { stdout } = await execFileAsync('git', ['-C', root, 'rev-parse', 'HEAD']);
+  return { root, fix: stdout.trim() };
+}
+
+test('a commit task starts from the parent with the fix commit tests, and the check confirms it fails first', async () => {
+  const { root, fix } = await makeFixRepo();
+  const tasks = parseBenchTasks(JSON.stringify([{ id: 'fix', task: 'fix app', commit: fix, verify: 'node tests/check.js' }]));
+  assert.deepEqual(await checkBenchTasks({ tasks, root }), [
+    { taskId: 'fix', ok: true, detail: 'before the fix: fails (good); at the fix: passes (good)' }
+  ]);
+
+  // An agent that does nothing leaves the parent's code, so the fix commit's test fails in both arms.
+  const directory = await scratchDirectory('tokio-live-commit-');
+  const scriptPath = join(directory, 'live-agent.js');
+  await writeFile(scriptPath, LIVE_AGENT, 'utf8');
+  const report = await runBench({
+    tasks,
+    agent: { command: process.execPath, args: [scriptPath] },
+    buildTokioPrompt: async (task) => task,
+    root,
+    mode: 'live'
+  });
+  assert.deepEqual(report.runs.map((run) => run.verified), [false, false]);
+  assert.equal(await worktreeCount(root), 1);
+});
+
+test('a task that already passes before its fix is flagged, and copied files must exist', async () => {
+  const { root, fix } = await makeFixRepo();
+  const tasks = parseBenchTasks(JSON.stringify([{ id: 'weak', task: 'x', commit: fix, verify: 'node -e "process.exit(0)"', tests: ['tests/check.js'] }]));
+  const [result] = await checkBenchTasks({ tasks, root });
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /passes \(task measures nothing\)/);
+  await assert.rejects(checkBenchTasks({ tasks, root, copyFiles: ['missing.local'] }), /--copy names missing\.local, which does not exist/);
+  assert.throws(() => parseBenchTasks('[{ "task": "x", "commit": "abc1234" }]'), /no "verify" command/);
+  assert.throws(() => parseBenchTasks('[{ "task": "x", "commit": "not a hash", "verify": "true" }]'), /must be a commit hash/);
+});
+
+// Regression: a shared folder is linked into each workspace through a junction. Deleting a workspace with the
+// junction still in place deletes the shared folder's contents, which once emptied a real vendor folder.
+async function addSharedFolder(root: string): Promise<string> {
+  await mkdir(join(root, 'vendor', 'bin'), { recursive: true });
+  const keep = join(root, 'vendor', 'bin', 'phpunit');
+  await writeFile(keep, 'keep me\n', 'utf8');
+  await writeFile(join(root, '.gitignore'), 'vendor/\n', 'utf8');
+  return keep;
+}
+
+test('shared folders survive worktree cleanup after a normal run and after a failed setup', async () => {
+  const { root, fix } = await makeFixRepo();
+  const keep = await addSharedFolder(root);
+  const tasks = parseBenchTasks(JSON.stringify([{ id: 'fix', task: 'fix app', commit: fix, verify: 'node -e "process.exit(require(\'fs\').existsSync(\'vendor/bin/phpunit\') ? 0 : 1)"' }]));
+
+  // Normal path: verify sees vendor through the link, and cleanup leaves the real folder whole.
+  const [checked] = await checkBenchTasks({ tasks, root, shared: ['vendor'] });
+  assert.match(checked.detail, /before the fix: passes/);
+  assert.equal(await readFile(keep, 'utf8'), 'keep me\n');
+
+  // Failure path: the link is made, then copying a missing file fails, and cleanup runs with the link in place.
+  await assert.rejects(checkBenchTasks({ tasks, root, shared: ['vendor'], copyFiles: ['missing.local'] }), /--copy names missing\.local/);
+  assert.equal(await readFile(keep, 'utf8'), 'keep me\n');
+  assert.equal(await worktreeCount(root), 1);
+});
+
+test('shared folders survive copy-workspace cleanup after a failed setup', async () => {
+  const root = await scratchDirectory('tokio-shared-copy-');
+  const keep = await addSharedFolder(root);
+  await assert.rejects(createCopyWorkspace(root, { shared: ['vendor'], copyFiles: ['missing.local'] }), /--copy names missing\.local/);
+  assert.equal(await readFile(keep, 'utf8'), 'keep me\n');
+});
+
+test('a verify that fails at the fix commit shows its first error lines', async () => {
+  const { root, fix } = await makeFixRepo();
+  const failing = 'node -e "console.log(\'starting\'); console.error(\'SQLSTATE[08006] password authentication failed for user postgres\'); process.exit(1)"';
+  const tasks = parseBenchTasks(JSON.stringify([{ id: 'env', task: 'x', commit: fix, verify: failing }]));
+  const [result] = await checkBenchTasks({ tasks, root });
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /at the fix: fails \(verify command or environment is wrong\)\n {4}at the fix, verify printed:\n {6}SQLSTATE\[08006\] password authentication failed for user postgres/);
+  assert.doesNotMatch(result.detail, /starting/);
+});
+
+test('removeLinksOrStop refuses to continue when a link cannot be removed', async () => {
+  const holder = await scratchDirectory('tokio-links-');
+  // A real folder with content stands in for a link that rmdir cannot remove.
+  await mkdir(join(holder, 'run', 'vendor'), { recursive: true });
+  await writeFile(join(holder, 'run', 'vendor', 'file.txt'), 'x', 'utf8');
+  await assert.rejects(removeLinksOrStop([join(holder, 'run', 'vendor')], holder), /left .* in place: it could not remove the link/);
+  assert.equal(existsSync(join(holder, 'run', 'vendor', 'file.txt')), true);
 });

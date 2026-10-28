@@ -2,7 +2,8 @@ import { randomBytes } from 'node:crypto';
 
 import * as vscode from 'vscode';
 
-import { WorkspaceContextService } from '../context/workspace';
+import { architectureMapStatus, openArchitectureMap, WorkspaceContextService } from '../context/workspace';
+import { buildMapRequest } from './mapgen';
 import { RepositoryMapPanel } from './map';
 import { handleWebviewRequest } from './messages';
 import { createRepoCatalogService } from './repos';
@@ -65,7 +66,19 @@ export class TokioViewProvider implements vscode.WebviewViewProvider {
     const messageSubscription = webview.onDidReceiveMessage((message: unknown) => {
       void this.handleMessage(webview, message);
     });
+    // Saving the map or any file it routes to can change its stale entries, so the status line rechecks on save.
+    const mapChanged = (): void => {
+      void webview.postMessage({ type: 'mapChanged' });
+    };
+    const mapWatcher = vscode.workspace.createFileSystemWatcher('**/.tokio/map.md');
+    const watchSubscriptions = [
+      mapWatcher,
+      mapWatcher.onDidCreate(mapChanged),
+      mapWatcher.onDidDelete(mapChanged),
+      vscode.workspace.onDidSaveTextDocument(mapChanged)
+    ];
     webviewView.onDidDispose(() => {
+      watchSubscriptions.forEach((subscription) => subscription.dispose());
       messageSubscription.dispose();
       this.webview = undefined;
     });
@@ -78,6 +91,8 @@ export class TokioViewProvider implements vscode.WebviewViewProvider {
       getActiveFilePath: () => getActiveWorkspaceFilePath(),
       getSelectedText: () => getSelectedEditorText(),
       getDiagnosticsText: () => getActiveFileDiagnostics(),
+      openArchitectureMap: () => openArchitectureMap(),
+      generateArchitectureMap: () => generateArchitectureMap(),
       openText: async (text) => {
         const document = await vscode.workspace.openTextDocument({ content: text, language: 'plaintext' });
         await vscode.window.showTextDocument(document, { preview: true });
@@ -104,6 +119,25 @@ function getTrustedWorkspaceRoot(): string {
     throw new Error('Open a local workspace folder to manage repositories.');
   }
   return folder.uri.fsPath;
+}
+
+/**
+ * Hands the map request to the user's agent. With Claude Code it opens in a new tab with the request filled in,
+ * because Claude Code does not let an extension type into a session that is already open. Otherwise it is copied.
+ */
+async function generateArchitectureMap(): Promise<string> {
+  const request = buildMapRequest(await architectureMapStatus());
+  if (vscode.extensions.getExtension('anthropic.claude-code')) {
+    try {
+      // Claude Code's own command, not a documented API: no session id starts a new conversation with this prompt.
+      await vscode.commands.executeCommand('claude-vscode.editor.open', undefined, request);
+      return 'Opened a new Claude Code tab with the map request. Press Enter there if it waits.';
+    } catch {
+      // Fall through to the clipboard.
+    }
+  }
+  await vscode.env.clipboard.writeText(request);
+  return 'Copied the map request. Paste it into your agent chat.';
 }
 
 function getActiveWorkspaceFilePath(): string | undefined {
@@ -213,8 +247,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       background: var(--field);
     }
     .brand-avatar { display: block; width: 100%; height: 100%; object-fit: cover; }
-    .app-header h1 { margin: 0; font-size: 1.05rem; font-weight: 650; line-height: 1.2; }
-    .step-counter { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .app-header h1 { flex: 1; margin: 0; font-size: 1.05rem; font-weight: 650; line-height: 1.2; }
 
     /* minmax(0, 1fr) lets columns shrink below their content, so a long line never widens the panel. */
     form { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--gap); }
@@ -291,7 +324,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
     button:focus-visible, summary:focus-visible { outline: 1px solid var(--focus); outline-offset: 2px; }
     input[type="checkbox"] { width: auto; accent-color: var(--accent); }
 
-    .input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
 
     /* Buttons: primary, secondary, ghost, and a compact size for any of them. */
     button {
@@ -327,7 +359,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
 
     /* Chips: one shape for every badge, with a tone per meaning. */
     .chip,
-    .local-badge,
     .detection-badge,
     .confidence-badge,
     .also-badge,
@@ -344,7 +375,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       line-height: 1.6;
       white-space: nowrap;
     }
-    .local-badge { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); font-weight: 600; }
     .detection-badge, .repo-badge[data-access="write"] { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent-text) 45%, transparent); background: var(--accent-soft); }
     .confidence-badge[data-confidence="high"] { color: var(--ok); }
     .confidence-badge[data-confidence="medium"], .repo-badge[data-access="granted"] { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
@@ -355,6 +385,14 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
     .detection-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 
     /* Workspace scope: one line by default, compact rows when open. The armed strip is always shown while a grant is live. */
+    /* Architecture map status: one line, always visible, since the map routes every task. */
+    .map-line { display: flex; align-items: center; gap: 8px; margin-bottom: var(--gap); padding: 4px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 0.88em; }
+    .map-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); padding: 0; border: 0; background: none; text-align: left; font: inherit; cursor: pointer; }
+    .map-text:disabled { cursor: default; }
+    .map-text:not(:disabled):hover { text-decoration: underline; }
+    .map-text strong { color: var(--ok); font-weight: 650; }
+    .map-text .map-stale { color: var(--warn); }
+    .prompt-details { margin-bottom: var(--gap); }
     .scope { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin-bottom: var(--gap); }
     .scope > details { border: 1px solid var(--border); border-radius: var(--radius-sm); }
     .scope-strip {
@@ -452,9 +490,11 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
 
     /* Prompt clarity */
     .analysis {
-      display: grid;
-      gap: 4px;
-      padding: 9px 10px;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 5px 10px;
+      font-size: 0.88em;
       border: 1px solid var(--border);
       border-left: 3px solid var(--muted);
       border-radius: var(--radius-sm);
@@ -463,12 +503,12 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
     .analysis:has(.analysis-level[data-level="high"]) { border-left-color: var(--ok); }
     .analysis:has(.analysis-level[data-level="medium"]) { border-left-color: var(--warn); }
     .analysis:has(.analysis-level[data-level="low"]) { border-left-color: var(--danger); }
-    .analysis-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; font-weight: 600; font-size: 0.92em; }
     .analysis-level { font-size: 0.85em; color: var(--muted); }
     .analysis-level[data-level="high"] { color: var(--ok); }
     .analysis-level[data-level="medium"] { color: var(--warn); }
     .analysis-level[data-level="low"] { color: var(--danger); }
-    .analysis-hints { margin: 0; padding-left: 18px; color: var(--muted); font-size: 0.88em; }
+    .analysis-level { flex: none; font-weight: 600; }
+    .analysis-hint { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 
     /* Result */
     .token-comparison { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
@@ -608,8 +648,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       body { padding: 8px 8px 0; }
       .card { padding: 11px; }
       .card.collapsible .card-body { padding: 11px; }
-      .input-row { grid-template-columns: 1fr; }
-      .local-badge, .shortcut { display: none; }
+      .shortcut { display: none; }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -624,8 +663,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         <img class="brand-avatar" src="${avatarUri}" alt="">
       </div>
       <h1>Tokio</h1>
-      <span id="step-counter" class="hint step-counter">Step 1 of 4 · Compose</span>
-      <span class="local-badge" title="No AI or network requests">● Local</span>
       <details class="repo-more app-menu">
         <summary title="Workspace actions" aria-label="Workspace actions">•••</summary>
         <div class="repo-menu">
@@ -663,8 +700,15 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       <p id="repos-status" class="status" role="status" aria-live="polite"></p>
     </section>
 
+    <section class="map-line" aria-label="Architecture map">
+      <button id="map-text" class="map-text" type="button" title="Open the map">Map: checking…</button>
+      <button id="map-open" class="ghost compact" type="button" title="Ask your agent to write the map from the code">Create</button>
+    </section>
+
     <form id="refine-form" novalidate autocomplete="off">
       <div id="compose-view" class="view">
+        <details id="prompt-details" class="advanced prompt-details">
+        <summary>Prompt for other tools <span class="hint">ChatGPT, Copilot, any chat</span></summary>
         <section class="card primary-card" aria-labelledby="request-heading">
           <div class="section-title">
             <h2 id="request-heading">Describe your change</h2>
@@ -673,92 +717,75 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
 
           <div class="field">
             <label for="raw-prompt" class="visually-hidden">Describe your change</label>
-            <textarea id="raw-prompt" required aria-describedby="raw-hint input-error" placeholder="What should change? Include the pain point, expected behavior, and constraints."></textarea>
+            <textarea id="raw-prompt" required aria-describedby="input-error" placeholder="What should change? Include the pain point, expected behavior, and constraints."></textarea>
             <p id="input-error" class="error" role="alert" hidden></p>
             <div id="scope-chips" class="scope-chips" aria-live="polite" hidden></div>
             <div id="analysis" class="analysis" aria-live="polite" hidden>
-              <div class="analysis-head">
-                <span>Prompt clarity</span>
-                <span id="analysis-level" class="analysis-level" data-level="low"></span>
-              </div>
-              <ul id="analysis-hints" class="analysis-hints"></ul>
+              <span id="analysis-level" class="analysis-level" data-level="low"></span>
+              <span id="analysis-hints" class="analysis-hint"></span>
             </div>
-            <p id="raw-hint" class="hint">Your original requirements stay verbatim in the refined prompt.</p>
           </div>
 
-          <div class="subsection" role="group" aria-labelledby="context-heading">
-            <div class="subsection-head">
-              <h3 id="context-heading">Add context</h3>
-              <span class="hint">optional</span>
-            </div>
+          <div class="subsection" role="group" aria-label="Add context">
             <div class="toolbar" aria-label="Add context from the editor">
               <button id="selection-button" class="ghost compact" type="button" title="Appends the selected editor text to your description.">+ Selection</button>
               <button id="diagnostics-button" class="ghost compact" type="button" title="Attaches the active file's errors and warnings. Replaces a block added earlier.">+ Errors</button>
+              <button id="active-file-button" class="ghost compact" type="button" title="Starts the task from the file open in the editor.">+ Active file</button>
             </div>
             <div id="context-chips" class="context-chips" aria-live="polite"></div>
             <p id="input-tool-status" class="status" role="status" aria-live="polite"></p>
-            <div class="field-grid wide">
-              <div class="field">
-                <label for="target-path">Starting file</label>
-                <div class="input-row">
-                  <input id="target-path" type="text" placeholder="src/features/example.ts" autocomplete="off">
-                  <button id="active-file-button" class="ghost compact" type="button" title="Uses the file open in the editor.">Active File</button>
-                </div>
-              </div>
-              <div class="field">
-                <label for="acceptance">Done when</label>
-                <textarea id="acceptance" rows="2" placeholder="e.g. the form shows an error and existing tests pass."></textarea>
-              </div>
-            </div>
-          </div>
-
-          <div class="subsection field">
-            <div class="subsection-head">
-              <label for="category">Work category</label>
-              <div class="detection-row" aria-live="polite">
-                <span id="category-result" class="detection-badge">Auto detect</span>
-                <span id="category-confidence" class="confidence-badge" data-confidence="low">On Refine</span>
-                <span id="category-also" class="also-badges" hidden></span>
-              </div>
-            </div>
-            <select id="category" aria-describedby="category-description">
-              <option value="auto" selected>Auto detect</option>
-              <option value="general">General</option>
-              <optgroup label="Plan">
-                <option value="planning">Planning</option>
-                <option value="decision">Decision</option>
-                <option value="investigation">Investigation</option>
-              </optgroup>
-              <optgroup label="Build">
-                <option value="feature">Feature</option>
-                <option value="enhancement">Enhancement</option>
-                <option value="ui">UI Work</option>
-                <option value="refactor">Refactor</option>
-                <option value="performance">Performance</option>
-                <option value="migration">Migration</option>
-              </optgroup>
-              <optgroup label="Fix">
-                <option value="bug">Bug Fix</option>
-                <option value="hotfix">Production Hotfix</option>
-                <option value="security">Security</option>
-              </optgroup>
-              <optgroup label="Maintain">
-                <option value="dependency">Dependency Upgrade</option>
-                <option value="workflow">Workflow / Automation</option>
-              </optgroup>
-              <optgroup label="Support">
-                <option value="tests">Tests</option>
-                <option value="documentation">Documentation</option>
-                <option value="review">Code Review</option>
-              </optgroup>
-              <option value="other">Other</option>
-            </select>
-            <p id="category-description" class="hint">Press Refine Prompt to detect every kind of work in the prompt. Each one adds a Type or Also line for you.</p>
+            <input id="target-path" type="hidden">
           </div>
 
           <details id="customize-details" class="advanced">
             <summary>Customize refinement <span id="settings-summary" class="hint"></span></summary>
             <div class="advanced-content">
+              <div class="field">
+                <div class="subsection-head">
+                  <label for="category">Work category</label>
+                  <div class="detection-row" aria-live="polite">
+                    <span id="category-result" class="detection-badge">Auto detect</span>
+                    <span id="category-confidence" class="confidence-badge" data-confidence="low">On Refine</span>
+                    <span id="category-also" class="also-badges" hidden></span>
+                  </div>
+                </div>
+                <select id="category">
+                  <option value="auto" selected>Auto detect</option>
+                  <option value="general">General</option>
+                  <optgroup label="Plan">
+                    <option value="planning">Planning</option>
+                    <option value="decision">Decision</option>
+                    <option value="investigation">Investigation</option>
+                  </optgroup>
+                  <optgroup label="Build">
+                    <option value="feature">Feature</option>
+                    <option value="enhancement">Enhancement</option>
+                    <option value="ui">UI Work</option>
+                    <option value="refactor">Refactor</option>
+                    <option value="performance">Performance</option>
+                    <option value="migration">Migration</option>
+                  </optgroup>
+                  <optgroup label="Fix">
+                    <option value="bug">Bug Fix</option>
+                    <option value="hotfix">Production Hotfix</option>
+                    <option value="security">Security</option>
+                  </optgroup>
+                  <optgroup label="Maintain">
+                    <option value="dependency">Dependency Upgrade</option>
+                    <option value="workflow">Workflow / Automation</option>
+                  </optgroup>
+                  <optgroup label="Support">
+                    <option value="tests">Tests</option>
+                    <option value="documentation">Documentation</option>
+                    <option value="review">Code Review</option>
+                  </optgroup>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div class="field">
+                <label for="acceptance">Done when</label>
+                <textarea id="acceptance" rows="2" placeholder="e.g. the form shows an error and existing tests pass."></textarea>
+              </div>
               <div class="field-grid">
                 <div class="field">
                   <label for="mode">Mode</label>
@@ -827,6 +854,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           <p id="refine-hint" class="hint action-hint" aria-live="polite"></p>
           <button id="stage-review" class="link" type="button" hidden>Back to refined prompt ›</button>
         </div>
+        </details>
       </div>
 
       <div id="review-view" class="view" hidden>
@@ -893,6 +921,9 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const rawStats = document.getElementById('raw-stats');
       const selectionButton = document.getElementById('selection-button');
       const diagnosticsButton = document.getElementById('diagnostics-button');
+      const mapText = document.getElementById('map-text');
+      const mapOpen = document.getElementById('map-open');
+      const promptDetails = document.getElementById('prompt-details');
       const analysisPanel = document.getElementById('analysis');
       const analysisLevel = document.getElementById('analysis-level');
       const analysisHints = document.getElementById('analysis-hints');
@@ -906,7 +937,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const category = document.getElementById('category');
       const categoryResult = document.getElementById('category-result');
       const categoryConfidence = document.getElementById('category-confidence');
-      const categoryDescription = document.getElementById('category-description');
       const categoryAlso = document.getElementById('category-also');
       const targetPath = document.getElementById('target-path');
       const activeFileButton = document.getElementById('active-file-button');
@@ -956,7 +986,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const composeView = document.getElementById('compose-view');
       const reviewView = document.getElementById('review-view');
       const stageReview = document.getElementById('stage-review');
-      const stepCounter = document.getElementById('step-counter');
       const contextChips = document.getElementById('context-chips');
       const settingsSummary = document.getElementById('settings-summary');
       const refineHint = document.getElementById('refine-hint');
@@ -987,6 +1016,10 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       let classificationTimer;
       let resolvedCategory = 'general';
       let contextPreview = null;
+      let mapRequestId = 0;
+      let pendingMapRequestId = 0;
+      let mapTimer;
+      let mapExists = false;
       let outputRevision = 0;
       let outputRevisionAtRequest = 0;
       let pendingRawForHistory = '';
@@ -1008,6 +1041,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         view = savedState.view === 'review' ? 'review' : 'compose';
         used = savedState.used === true;
         refinedFrom = savedState.refinedFrom || '';
+        promptDetails.open = savedState.promptOpen === true || view === 'review';
       }
       contextDetails.open = contextScope.value !== 'none';
 
@@ -1025,7 +1059,8 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           history,
           view,
           used,
-          refinedFrom
+          refinedFrom,
+          promptOpen: promptDetails.open
         });
         markIfStale();
         renderContextChips();
@@ -1063,6 +1098,10 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
 
       const showView = (next, focus) => {
         view = next;
+        // Coming back to edit a prompt opens its section, so the form is never hidden behind a collapsed heading.
+        if (next === 'compose' && focus) {
+          promptDetails.open = true;
+        }
         composeView.hidden = next !== 'compose';
         reviewView.hidden = next !== 'review';
         window.scrollTo({ top: 0 });
@@ -1074,14 +1113,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
 
       const updateJourney = () => {
         const hasResult = refinedPrompt.value.length > 0;
-        const stale = !staleBanner.hidden;
-        // The main button names the next action, so one counter replaces the four-step bar.
-        const [number, name] = refining
-          ? [2, 'Refining…']
-          : view === 'review'
-            ? used && !stale ? [4, 'Used'] : [3, 'Review']
-            : [1, 'Compose'];
-        stepCounter.textContent = 'Step ' + number + ' of 4 · ' + name;
         stageReview.hidden = view !== 'compose' || !hasResult;
         reviewEmpty.hidden = hasResult;
         reviewContent.hidden = !hasResult;
@@ -1093,8 +1124,20 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       const updateSettingsSummary = () => {
         const label = (select) => select.options[select.selectedIndex]?.text || '';
         const context = contextScope.value === 'none' ? 'no repo context' : label(contextScope);
-        settingsSummary.textContent = [label(mode), label(outputStyle), label(target), context].join(' · ');
+        settingsSummary.textContent = [
+          category.value === 'auto' ? '' : label(category),
+          acceptance.value.trim() ? 'done-when' : '',
+          label(mode), label(outputStyle), label(target), context
+        ].filter(Boolean).join(' · ');
       };
+
+      let toolStatusTimer;
+      new MutationObserver(() => {
+        clearTimeout(toolStatusTimer);
+        if (inputToolStatus.textContent) {
+          toolStatusTimer = setTimeout(() => { inputToolStatus.textContent = ''; }, 4000);
+        }
+      }).observe(inputToolStatus, { childList: true, characterData: true, subtree: true });
 
       const afterContextChange = (message) => {
         inputToolStatus.textContent = message;
@@ -1157,25 +1200,16 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         clearButton.textContent = 'Clear everything…';
       };
 
+      // One line: the clarity score and the most useful hint. The tooltip lists every hint.
       const renderAnalysis = (analysis) => {
-        analysisHints.replaceChildren();
         if (!analysis || rawPrompt.value.trim().length === 0) {
           analysisPanel.hidden = true;
           return;
         }
-        analysisLevel.textContent = analysis.level.charAt(0).toUpperCase() + analysis.level.slice(1)
-          + ' · ' + analysis.score + '/100';
+        analysisLevel.textContent = 'Clarity ' + analysis.score;
         analysisLevel.dataset.level = analysis.level;
-        analysis.hints.forEach((hint) => {
-          const item = document.createElement('li');
-          item.textContent = hint;
-          analysisHints.appendChild(item);
-        });
-        if (analysis.hints.length === 0) {
-          const item = document.createElement('li');
-          item.textContent = 'No obvious gaps detected.';
-          analysisHints.appendChild(item);
-        }
+        analysisHints.textContent = analysis.hints[0] || 'No obvious gaps.';
+        analysisPanel.title = analysis.hints.join(' ');
         analysisPanel.hidden = false;
       };
 
@@ -1308,7 +1342,6 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         categoryResult.textContent = 'Auto detect';
         categoryConfidence.textContent = 'On Refine';
         categoryConfidence.dataset.confidence = 'low';
-        categoryDescription.textContent = 'Press Refine Prompt to detect every kind of work in the prompt. Each one adds a Type or Also line for you.';
       };
 
       const renderCategory = (classification) => {
@@ -1318,22 +1351,16 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
           categoryResult.textContent = 'Manual: ' + categoryLabels[resolvedCategory];
           categoryConfidence.textContent = 'Override';
           categoryConfidence.dataset.confidence = 'manual';
-          categoryDescription.textContent = 'Manual override is active. Select Auto detect to resume suggestions.';
           return;
         }
 
         resolvedCategory = classification?.category || 'general';
         const confidence = classification?.confidence || 'low';
-        const signals = classification?.matchedSignals || [];
         categoryResult.textContent = 'Detected: ' + categoryLabels[resolvedCategory];
         categoryConfidence.textContent = confidence.charAt(0).toUpperCase() + confidence.slice(1) + ' confidence';
         categoryConfidence.dataset.confidence = confidence;
         const additional = classification?.additional || [];
         renderAlso(additional);
-        categoryDescription.textContent = (signals.length > 0
-          ? 'Matched signals: ' + signals.join(', ') + '.'
-          : 'No clear category signal; General keeps the prompt assumption-free.')
-          + (additional.length > 0 ? ' Also found: each extra category adds one guidance line.' : '');
       };
 
       const requestCategoryClassification = (delay = 180) => {
@@ -1482,6 +1509,59 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         renderHistory();
         saveState();
       });
+
+      // Rechecks are debounced, since saving several files fires several changes.
+      const requestMapStatus = (delay = 300) => {
+        clearTimeout(mapTimer);
+        mapTimer = setTimeout(() => {
+          mapRequestId += 1;
+          pendingMapRequestId = mapRequestId;
+          vscode.postMessage({ type: 'mapStatus', requestId: mapRequestId });
+        }, delay);
+      };
+
+      const renderMapStatus = (status) => {
+        mapText.replaceChildren();
+        mapExists = status.exists;
+        mapText.disabled = !status.exists;
+        mapOpen.textContent = status.exists ? 'Regenerate' : 'Create';
+        mapOpen.title = status.exists
+          ? 'Ask your agent to rewrite the map from the current code, fixing stale entries'
+          : 'Ask your agent to write the map from the code';
+        mapText.title = status.stale.length > 0
+          ? 'Not found (fix the map): ' + status.stale.join('; ')
+          : status.path;
+        if (status.error) {
+          mapText.textContent = 'Map: ' + status.error;
+          return;
+        }
+        if (!status.exists) {
+          mapText.textContent = 'Map: none. Create one so every task goes to exact files.';
+          return;
+        }
+        const count = document.createElement('strong');
+        count.textContent = status.areas + (status.areas === 1 ? ' area' : ' areas');
+        mapText.append('Map: ', count, ' · ' + status.routes + (status.routes === 1 ? ' route' : ' routes'));
+        if (status.stale.length > 0) {
+          const stale = document.createElement('span');
+          stale.className = 'map-stale';
+          stale.textContent = ' · ' + status.stale.length + ' stale';
+          mapText.append(stale);
+        }
+      };
+
+      mapOpen.addEventListener('click', () => {
+        mapText.textContent = 'Sending the map request to your agent…';
+        requestEditorTool('generateMap');
+      });
+
+      mapText.addEventListener('click', () => {
+        if (mapExists) {
+          requestEditorTool('architectureMap');
+        }
+      });
+
+      promptDetails.addEventListener('toggle', saveState);
 
       selectionButton.addEventListener('click', () => {
         inputToolStatus.textContent = 'Reading the current editor selection...';
@@ -1871,6 +1951,7 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       document.addEventListener('visibilitychange', () => {
         if (!document.hidden) {
           requestRepos('list');
+          requestMapStatus(0);
         }
       });
 
@@ -1883,6 +1964,18 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
         // The repository map changed the catalog, so reload it here too.
         if (message.type === 'reposChanged') {
           requestRepos('list');
+          return;
+        }
+
+        if (message.type === 'mapChanged') {
+          requestMapStatus();
+          return;
+        }
+
+        if (message.type === 'mapStatusResult') {
+          if (message.requestId === pendingMapRequestId) {
+            renderMapStatus(message.status);
+          }
           return;
         }
 
@@ -1921,6 +2014,16 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
 
         if (message.type === 'toolResult') {
           if (message.requestId !== pendingToolRequestId) {
+            return;
+          }
+
+          if (message.tool === 'architectureMap' || message.tool === 'generateMap') {
+            // Generation results stay readable for a while; the status returns after.
+            if (!message.success || message.tool === 'generateMap') {
+              mapText.textContent = message.message;
+              mapText.title = message.message;
+            }
+            requestMapStatus(message.success && message.tool === 'architectureMap' ? 300 : 6000);
             return;
           }
 
@@ -2062,8 +2165,9 @@ function getWebviewHtml(avatarUri: vscode.Uri, cspSource: string): string {
       composeView.hidden = view !== 'compose';
       reviewView.hidden = view !== 'review';
       saveState();
-      // Fill the workspace summary up front, so repository status is visible while composing.
+      // Fill the workspace summary and map status up front, so both are visible at once.
       requestRepos('list');
+      requestMapStatus(0);
     })();
   </script>
 </body>

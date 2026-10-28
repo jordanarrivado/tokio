@@ -526,3 +526,58 @@ test('ask_repo rejects unknown, ambiguous, and own repository names, and reports
   assert.equal(failed.isError, true);
   assert.match(failed.text, /Credit balance is too low/);
 });
+
+test('repo_map with mapPath starts from the routes the architecture map names and reports stale entries', async () => {
+  const root = await createRepo({
+    'src/auth/login.ts': LOGIN_SOURCE,
+    'src/store.ts': 'export class Store {}\n',
+    'src/billing/invoice.ts': 'export function invoice() {}\n',
+    'docs/ARCHITECTURE.md': [
+      '# Architecture',
+      '## Auth',
+      'Keywords: login, session',
+      '- POST /api/login -> src/auth/login.ts#login',
+      '- Related: src/store.ts, src/auth/gone.ts',
+      '## Billing',
+      'Keywords: invoice',
+      '- GET /api/invoices -> src/billing/invoice.ts#invoice'
+    ].join('\n')
+  });
+  const outcome = await new Broker(root).callTool('repo_map', { task: 'session ends after login', mapPath: 'docs/ARCHITECTURE.md' });
+
+  assert.equal(outcome.isError, undefined);
+  assert.match(outcome.text, /^Architecture map: Auth\./);
+  assert.match(outcome.text, /- src\/auth\/login\.ts:3-5 login \(POST \/api\/login\)/);
+  assert.match(outcome.text, /- src\/store\.ts \(related\)/);
+  assert.match(outcome.text, /Auth: no file or folder at src\/auth\/gone\.ts/);
+  assert.doesNotMatch(outcome.text.split('Repository map')[0], /invoice/);
+  assert.ok(outcome.files?.includes('src/auth/login.ts'));
+});
+
+test('repo_map blocks a secret or non-Markdown mapPath', async () => {
+  const root = await createRepo({ 'src/a.ts': 'export function a() {}\n', '.env': 'X=1\n', 'notes.ts': 'export const x = 1;\n' });
+  const broker = new Broker(root);
+  const secret = await broker.callTool('repo_map', { task: 'a', mapPath: '.env' });
+  assert.equal(secret.isError, true);
+  assert.equal(secret.blocked, true);
+  const code = await broker.callTool('repo_map', { task: 'a', mapPath: 'notes.ts' });
+  assert.equal(code.isError, true);
+  assert.match(code.text, /must be a Markdown file/);
+});
+
+test('repo_map uses .tokio/map.md without mapPath, and is unchanged when there is no map or no match', async () => {
+  const root = await createRepo({
+    'src/auth/login.ts': LOGIN_SOURCE,
+    'src/store.ts': 'export class Store {}\n',
+    '.tokio/map.md': '## Auth\nKeywords: login\n- login -> src/auth/login.ts#login\n'
+  });
+  const broker = new Broker(root);
+  const matched = await broker.callTool('repo_map', { task: 'login is slow' });
+  assert.match(matched.text, /^Architecture map: Auth\..*\n- src\/auth\/login\.ts:3-5 login \(login\)/);
+  const unmatched = await broker.callTool('repo_map', { task: 'store caching' });
+  assert.match(unmatched.text, /^Repository map:/);
+
+  const plain = await new Broker(await createRepo({ 'src/auth/login.ts': LOGIN_SOURCE })).callTool('repo_map', { task: 'login is slow' });
+  assert.equal(plain.isError, undefined);
+  assert.match(plain.text, /^Repository map:/);
+});

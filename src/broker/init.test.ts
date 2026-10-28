@@ -51,6 +51,8 @@ test('creates the Claude Code and Codex configs and the guidance block in an emp
   assert.equal(settings.hooks.PreToolUse[0].matcher, 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|SendMessage');
   assert.equal(settings.hooks.PreToolUse[0].hooks[0].command, `node ${cli} hook`);
   assert.equal(settings.hooks.UserPromptSubmit[0].hooks[0].command, `node ${cli} prompt-hook`);
+  assert.equal(settings.hooks.PostToolUse[0].matcher, 'Bash|PowerShell');
+  assert.equal(settings.hooks.PostToolUse[0].hooks[0].command, `node ${cli} output-hook`);
   assert.ok(settings.permissions.deny.includes('Read(.env)'));
   assert.ok(settings.permissions.deny.includes('Read(secrets/**)'));
 

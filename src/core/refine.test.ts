@@ -199,3 +199,20 @@ test('renders Claude and Codex target formats without changing the task text', (
   assert.match(codex, /^## Task\nFix the redirect\./);
   assert.match(codex, /## Constraints\n- /);
 });
+
+test('lists architecture map routes first, skips files they already name, and reports stale entries', () => {
+  const result = refinePrompt({
+    rawPrompt: 'Login fails after the token expires.',
+    repositoryContext: {
+      scope: 'targeted',
+      files: ['src/auth/login.ts', 'src/other.ts'],
+      mapRoutes: ['src/auth/login.ts:3-5 handleLogin (POST /api/login)', 'src/auth/session.ts (related)'],
+      mapStale: ['Auth: src/auth/me.ts not found']
+    }
+  });
+
+  assert.match(result.refinedPrompt, /Architecture map routes \(start here; read only these lines\):\n- src\/auth\/login\.ts:3-5 handleLogin \(POST \/api\/login\)/);
+  assert.match(result.refinedPrompt, /Map entries not found \(the map may be out of date\): Auth: src\/auth\/me\.ts not found\./);
+  assert.equal(countOccurrences(result.refinedPrompt, 'src/auth/login.ts'), 1);
+  assert.match(result.refinedPrompt, /src\/other\.ts/);
+});

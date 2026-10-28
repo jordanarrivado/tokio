@@ -33,6 +33,12 @@ test('packaged extension activates and renders its view without development file
             return disposable;
           }
         },
+        workspace: {
+          createFileSystemWatcher() {
+            return { ...disposable, onDidCreate() { return disposable; }, onDidChange() { return disposable; }, onDidDelete() { return disposable; } };
+          },
+          onDidSaveTextDocument() { return disposable; }
+        },
         commands: { registerCommand() { return disposable; } },
         Uri: { joinPath(base, ...parts) { return base + '/' + parts.join('/'); } }
       };

@@ -157,6 +157,13 @@ export function checkClaudeSettings(text: string | undefined): DoctorCheck[] {
     checks.push({ level: 'info', name: 'UserPromptSubmit hook', detail: 'not registered. Optional: adds a repo map to matching prompts and adds tokens to each one.' });
   }
 
+  const postToolUse = commandsFor(hooks, 'PostToolUse');
+  if (postToolUse.some((command) => /cli.jsS*s+output-hook(s|$)/.test(command))) {
+    checks.push({ level: 'ok', name: 'PostToolUse hook', detail: 'tokio output-hook is registered.' });
+  } else {
+    checks.push({ level: 'info', name: 'PostToolUse hook', detail: 'not registered. Optional: compacts long test, build, and install output. Run tokio init to add it.' });
+  }
+
   return checks;
 }
 

@@ -1,0 +1,10 @@
+[
+  { "prompt": "the output hook drops the TypeError line from npm test logs", "areas": ["Command output compaction (PostToolUse)"], "allow": ["Prompt hook (UserPromptSubmit)", "Data structures and types"] },
+  { "prompt": "map check should fail when a sample prompt names a renamed area", "areas": ["Architecture map"], "allow": ["Messaging between repository agents"] },
+  { "prompt": "recursive grep through Bash can still read .env files", "areas": ["Secret protection and tool policy (PreToolUse)"] },
+  { "prompt": "the prompt hook injects map areas into cross-session messages", "areas": ["Prompt hook (UserPromptSubmit)"], "allow": ["Architecture map", "Messaging between repository agents"] },
+  { "prompt": "read_symbol returns the whole file on a repeat read", "areas": ["MCP server and agent tools"], "allow": ["Repository map and ranking"] },
+  { "prompt": "tokio init does not add the PostToolUse hook to settings.json", "areas": ["Project setup and health checks"], "allow": ["Command output compaction (PostToolUse)", "Multiple repositories (catalog)"] },
+  { "prompt": "bench should compare billable tokens with hooks on and off", "areas": ["Benchmark"] },
+  { "prompt": "is this worth it for the team", "areas": [] }
+]

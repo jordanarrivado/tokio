@@ -8,17 +8,22 @@ import {
   extractSearchTerms,
   findRelatedTests,
   isSafeTextPath,
+  isSecretPath,
   rankContextPaths,
   resolveMentionedPaths,
   type RankSignals
 } from './discovery';
 import { detectConventionFiles, detectValidationCommands } from './project';
+import { checkMap, formatAnchor, MAP_PATH, MAP_TEMPLATE, mapPaths, parseArchitectureMap, rankMapAreas, resolveMapAnchors, type MapArea, type MapFile } from './archmap';
 
 const MAX_DISCOVERED_FILES = 500;
 const MAX_READ_BYTES = 32_000;
 const MAX_CONTENT_SCAN_FILES = 150;
 const CONTENT_SCAN_BATCH = 20;
 const MAX_ARCHITECTURE_CHARS = 1200;
+const MAX_MAP_BYTES = 128_000;
+/** Routed files are only searched for line numbers, never sent whole, so they may be larger than scanned files. */
+const MAX_ROUTED_FILE_BYTES = 512_000;
 const EXCLUDE_GLOB = '**/{node_modules,.git,dist,build,out,coverage,.next,vendor}/**';
 const ARCHITECTURE_PATH = '.tokio/architecture.md';
 const LEGACY_ARCHITECTURE_PATH = '.token-saver/architecture.md';
@@ -30,6 +35,14 @@ export interface ContextScanInput {
 }
 
 export class WorkspaceContextService {
+  public routeMap(input: { rawPrompt: string }): Promise<{ areas: string[]; routes: string[]; stale: string[] } | undefined> {
+    return routeArchitectureMap(input.rawPrompt);
+  }
+
+  public mapStatus(): Promise<MapStatus> {
+    return architectureMapStatus();
+  }
+
   public async scan(input: ContextScanInput): Promise<ContextPreview> {
     if (!vscode.workspace.isTrusted) {
       throw new Error('Trust this workspace before scanning repository context.');
@@ -154,6 +167,137 @@ export class WorkspaceContextService {
   }
 }
 
+export interface MapStatus {
+  path: string;
+  exists: boolean;
+  areas: number;
+  routes: number;
+  /** Entries whose file or symbol no longer exists. */
+  stale: string[];
+  /** Set when the map exists but cannot be used. */
+  error?: string;
+}
+
+interface WorkspaceMap {
+  folder: vscode.WorkspaceFolder;
+  path: string;
+  areas: MapArea[];
+}
+
+/**
+ * The workspace's architecture map, from the first folder that has one. Undefined when no folder has a map;
+ * an error when one exists but cannot be read.
+ */
+async function loadWorkspaceMap(): Promise<WorkspaceMap | undefined> {
+  if (!vscode.workspace.isTrusted) {
+    throw new Error('Trust this workspace to use its architecture map.');
+  }
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const entry = await resolveTargetEntry(MAP_PATH, folders);
+  const folder = entry && vscode.workspace.getWorkspaceFolder(entry.uri);
+  if (!entry || !folder) {
+    return undefined;
+  }
+  const text = await readSmallTextFile(entry.uri, MAX_MAP_BYTES);
+  if (text === undefined) {
+    throw new Error(`${MAP_PATH} is larger than ${MAX_MAP_BYTES / 1000} KB or could not be read.`);
+  }
+  return { folder, path: entry.path, areas: parseArchitectureMap(text) };
+}
+
+/** Reads the files a map names, relative to the folder that holds the map. Missing files are left out. */
+async function loadMappedFiles(paths: readonly string[], folder: vscode.WorkspaceFolder): Promise<Map<string, MapFile>> {
+  const loaded = new Map<string, MapFile>();
+  await Promise.all(paths.map(async (path) => {
+    const entry = await resolveTargetEntry(path, [folder]);
+    const content = entry ? await readSmallTextFile(entry.uri, MAX_ROUTED_FILE_BYTES) : undefined;
+    if (entry && content !== undefined) {
+      loaded.set(path, { path: entry.path, content });
+    }
+  }));
+  return loaded;
+}
+
+/** Map paths that name a folder in the workspace folder, so they are listed as folders instead of reported stale. */
+async function findMappedFolders(paths: readonly string[], folder: vscode.WorkspaceFolder): Promise<Set<string>> {
+  const folders = new Set<string>();
+  await Promise.all(paths.map(async (path) => {
+    if (!path || path.startsWith('/') || path.includes(':') || path.split('/').includes('..') || isSecretPath(path)) {
+      return;
+    }
+    try {
+      const stat = await vscode.workspace.fs.stat(vscode.Uri.joinPath(folder.uri, ...path.split('/')));
+      if (stat.type === vscode.FileType.Directory) {
+        folders.add(path);
+      }
+    } catch {
+      // Missing: reported as stale.
+    }
+  }));
+  return folders;
+}
+
+/**
+ * Routes a task through the workspace's architecture map. Only the map and the files its best areas name
+ * are read, so this stays cheap however large the workspace is. Undefined when there is no usable map.
+ */
+export async function routeArchitectureMap(rawPrompt: string): Promise<{ areas: string[]; routes: string[]; stale: string[] } | undefined> {
+  const map = await loadWorkspaceMap();
+  if (!map || map.areas.length === 0) {
+    return undefined;
+  }
+  const ranked = rankMapAreas(map.areas, rawPrompt);
+  const paths = mapPaths(ranked);
+  const loaded = await loadMappedFiles(paths, map.folder);
+  const folders = await findMappedFolders(paths.filter((path) => !loaded.has(path)), map.folder);
+  const routing = resolveMapAnchors(ranked, (path) => loaded.get(path), rawPrompt, (path) => folders.has(path));
+  return { areas: routing.areas, routes: routing.anchors.map((anchor) => formatAnchor(anchor)), stale: routing.stale };
+}
+
+/** Checks every entry in the workspace's map, for the panel's status line. Never throws. */
+export async function architectureMapStatus(): Promise<MapStatus> {
+  const empty = { path: MAP_PATH, exists: false, areas: 0, routes: 0, stale: [] };
+  try {
+    const map = await loadWorkspaceMap();
+    if (!map) {
+      return empty;
+    }
+    if (map.areas.length === 0) {
+      return { ...empty, path: map.path, exists: true, error: 'No areas yet. Add "## Area" headings with "- label -> path#symbol" lines.' };
+    }
+    const all = map.areas.map((area) => ({ area, score: 0 }));
+    const paths = mapPaths(all);
+    const loaded = await loadMappedFiles(paths, map.folder);
+    const folders = await findMappedFolders(paths.filter((path) => !loaded.has(path)), map.folder);
+    return { path: map.path, exists: true, ...checkMap(map.areas, (path) => loaded.get(path), (path) => folders.has(path)) };
+  } catch (error: unknown) {
+    return { ...empty, error: error instanceof Error ? error.message : 'The architecture map could not be read.' };
+  }
+}
+
+/**
+ * Opens the workspace's architecture map, creating it from a template in the first folder when there is none.
+ * Returns the map's workspace-relative path.
+ */
+export async function openArchitectureMap(): Promise<string> {
+  if (!vscode.workspace.isTrusted) {
+    throw new Error('Trust this workspace to create an architecture map.');
+  }
+  const folders = vscode.workspace.workspaceFolders ?? [];
+  const existing = await resolveTargetEntry(MAP_PATH, folders);
+  let uri = existing?.uri;
+  if (!uri) {
+    const folder = folders[0];
+    if (!folder) {
+      throw new Error('Open a workspace folder first.');
+    }
+    uri = vscode.Uri.joinPath(folder.uri, ...MAP_PATH.split('/'));
+    await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(MAP_TEMPLATE));
+  }
+  await vscode.window.showTextDocument(uri, { preview: false });
+  return existing?.path ?? MAP_PATH;
+}
+
 interface GitApi {
   repositories: ReadonlyArray<{
     state: {
@@ -270,10 +414,10 @@ async function resolveTargetEntry(
   return undefined;
 }
 
-async function readSmallTextFile(uri: vscode.Uri): Promise<string | undefined> {
+async function readSmallTextFile(uri: vscode.Uri, maxBytes = MAX_READ_BYTES): Promise<string | undefined> {
   try {
     const stat = await vscode.workspace.fs.stat(uri);
-    if (stat.type !== vscode.FileType.File || stat.size > MAX_READ_BYTES) {
+    if (stat.type !== vscode.FileType.File || stat.size > maxBytes) {
       return undefined;
     }
     return new TextDecoder('utf-8', { fatal: true }).decode(await vscode.workspace.fs.readFile(uri));

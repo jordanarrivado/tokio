@@ -179,6 +179,55 @@ Create `.tokio/architecture.md` in the repository you want Tokio to understand. 
 
 Treat this as curated project documentation. Tokio does not verify whether the statements are correct. The legacy `.token-saver/architecture.md` path remains readable but produces a rename notice.
 
+### Architecture map
+
+An architecture map routes every task straight to the files and lines that serve it, so the agent skips the repository search. Each repository keeps one map at `.tokio/map.md`, committed with the code. Each heading is one area of the system, and data structures are areas like any other:
+
+```markdown
+# Architecture map
+
+## Auth
+Keywords: login, token, session
+- POST /api/login -> src/auth/login.ts#handleLogin
+- GET /api/me -> src/auth/me.ts#getMe
+- Related: src/auth/session.ts, src/db/users.ts
+
+## Employee data
+Keywords: employee, record, salary, model, table
+- Employee model -> app/Models/Employee.php#Employee
+- employees table -> database/migrations/2024_01_create_employees.php
+- EmployeeResource -> app/Http/Resources/EmployeeResource.php
+```
+
+- A route line is `- <label> -> <path>[#symbol]`. The label can be an HTTP route, a model, a table, a CLI command, a job name, or anything else. `Class.method` names a method. Paths are relative to the repository root.
+- `Keywords:` and `Related:` lines are optional. Other text under a heading still counts for matching, but is never sent to the agent.
+- Tokio ranks the areas against each task with local BM25 (no model, no network) and sends only the best areas' files with line ranges, usually 50 to 200 tokens. The map itself is never sent whole.
+- The panel shows the map's status under the workspace strip, such as `Map: 12 areas · 40 routes · 2 stale`. **Create** writes a starter map; **Open** edits it. Hover the line to see stale entries. The status rechecks on every save.
+- `repo_map` uses the map without being asked: matched routes come first, and the routed files rank first in the repository map below them. `mapPath` picks a different map.
+- The `prompt-hook` sends matched areas instead of a repository map. Each area's lines are sent once per Claude Code session; later prompts that match it get a one-line pointer instead, since the agent still has the lines. The per-session record is `.tokio/map-session.json`, which `tokio init` adds to `.gitignore`. When the repository has a map and no area matches, the hook adds nothing; the keyword-ranked repository map is used only in repositories without a map. Prompts for or from another agent (`~name`, or a cross-session message) get no context.
+- An area matches only when the task shares at least two terms with its heading, keywords, route labels, or symbols, or one such term in a short task. Areas scoring under half of the best area are dropped. Paths, prose, and generic verbs (ask, send, check) never qualify an area on their own.
+- A route or `Related:` entry that names a folder is listed as `path/ (folder)`. A missing path is reported as `no file or folder at <path>`, and a missing symbol as `symbol <Name> not found in <file>`.
+- **Prompt for other tools** in the panel refines a prompt with the same routes, for chats that cannot call Tokio.
+- A route whose file or symbol no longer exists is reported as not found, so a stale map shows up instead of sending the agent to the wrong place. Keep the map in review with the code it describes.
+
+#### Test the map with sample prompts
+
+`tokio map check` resolves every entry in the map and runs sample prompts through the same matching the prompt hook uses. Keep the prompts in `.tokio/map-prompts.json`, next to the map, and re-run the check after every Keywords edit:
+
+```json
+[
+  { "prompt": "the payslip pdf shows the wrong net pay", "areas": ["Payslips", "Payroll run"] },
+  { "prompt": "overtime is wrong for night differential", "areas": ["Time sheets"], "allow": ["Payroll parameters"] },
+  { "prompt": "is this map worth keeping", "areas": [] }
+]
+```
+
+- `areas` lists the areas the prompt must match. `[]` means it should match nothing.
+- `allow` lists areas that may also match without failing the prompt.
+- Area names are matched without regard to case. A name that is not in the map is an error, so a renamed area is caught.
+
+The check prints each failing prompt with the areas it matched, the expected ones it missed, and any extra ones. Each matched area shows its score as a share of the best area and the terms behind it, such as `Loans 0.67 (via loan, deduction)`, so the keyword to edit is visible. A missed area gets a reason: no task term in the area, only one strong term, a score under the 0.5 cutoff, or outranked by the top three. The summary lists areas that no sample prompt covers. It exits 1 on a failing prompt or a stale entry, so it can run in CI. Without a prompts file it only checks the entries. `--prompts <file>` names another file inside the repository, and `--verbose` also prints passing prompts with their scores, to show an area close to the cutoff before it flips.
+
 ## Agent broker (Claude Code and Codex)
 
 The broker is a local CLI with no runtime dependencies. It is separate from the VS Code panel and does not call any AI service. Build it first with `npm.cmd run build`, then run it from `out/broker/cli.js`.
@@ -208,6 +257,7 @@ The manual steps below show what `init` writes. Use them only if you prefer to e
 | `tokio hook` | `PreToolUse` hook. Reads the event on stdin, exits `2` to block secret access or an edit outside the write scope. |
 | `tokio scope [<repo>...] [--hours <n>] [--clear] [--root <dir>]` | Shows or grants write on catalog repositories. Run it yourself, not through the agent. |
 | `tokio map "<task>" [--root <dir>] [--target <path>] [--budget <tokens>]` | Prints the ranked repository map for a task. |
+| `tokio map check [--root <dir>] [--prompts <file>] [--verbose]` | Checks the architecture map's entries and the areas sample prompts match. Exits 1 on a failure. |
 | `tokio doctor [--root <dir>]` | Read-only check of the project's Tokio setup. Reports missing or misplaced config, such as a permissions rule nested inside a hook. Exits 1 on failures. |
 | `tokio bench <tasks.json> [--repeat <n>] [--out <report.json>]` | Compares raw and Tokio prompts through `claude -p`. |
 
@@ -328,6 +378,18 @@ Register it in the project's `.claude/settings.json`, next to the PreToolUse hoo
 
 The hook fails open. Any error, such as a missing repository or malformed input, adds nothing and never blocks the prompt. Claude Code allows 30 seconds for this hook and caps the injected context at 10,000 characters. Injection costs tokens on every matching prompt, even when the agent would not have needed the map. Whether it saves tokens overall depends on the task, so measure it with `tokio bench` before relying on it.
 
+### Command output compaction
+
+`tokio output-hook` is a `PostToolUse` hook for Bash and PowerShell. When a test, build, lint, or install command (`npm test`, `tsc`, `pytest`, `cargo test`, `php artisan test`, `composer install`, and similar) prints more than about 4,000 characters, the hook replaces the output the agent sees with:
+
+- the first 5 and last 20 lines, which usually hold the command and the summary;
+- every line that looks like an error, failure, assertion, warning, or `file:line` location, plus the 2 lines after it (up to 80 lines). Failures and thrown errors (`✖`, `not ok`, `FAIL`, `TypeError:`, `Traceback`) are picked before warnings, and passing-test lines (`✔`, `ok 3`, `PASS`) never count, even when a test's name mentions an error;
+- a marker for each omitted run of lines, and a footer with an output id.
+
+ANSI color codes and carriage-return progress frames are removed, and repeated lines collapse into one. The full output is redacted for credential-shaped values and saved under the system temp directory (`tokio-outputs`, newest 50 kept). `search_output` with the footer's id searches it. Output from other commands, and output that compaction would shrink by less than 30%, passes through unchanged. Any hook error also leaves the original output in place. `tokio init` registers the hook, and each compaction is recorded in `.tokio/audit.log` with its estimated savings.
+
+The command has already run when the hook fires; only what the agent reads changes. A failure line that matches none of the patterns can be dropped, so the agent may need `search_output` for unusual tools.
+
 Secret paths (`.env`, credential files, keys) are blocked in file fields and in Bash command tokens. Unparseable hook input is blocked. The hook blocks Bash commands that read whole trees: recursive `grep` (`-r`, `-R`, `--recursive`), `find -exec`, and `xargs` feeding a reader such as `cat`. The agent is asked to name files explicitly. It still does not parse arbitrary shell, so quoted or nested commands, shell globs such as `cat *`, and `$(find ...)` can still read secret files. As a second layer, `tokio init` adds `Read(...)` deny rules for the same file patterns to `permissions.deny` in `.claude/settings.json`. Claude Code applies a `Read` deny to Read, Grep, Glob, and Edit/Write on the same path, and it enforces the rule even when a hook allows the call. Deny rules match Bash command text, not what a program reads, so they do not stop `grep -r` or `cat` run through Bash. The hook is the only Bash-side check. Use a sandbox if Bash reads must be fully blocked.
 
 Every broker call and every hook block appends one line to `.tokio/audit.log`. The log records tool name, estimated tokens, file paths, and redaction kinds. It never records file contents or prompt text. The `*.log` pattern in `.gitignore` keeps it out of version control.
@@ -355,6 +417,33 @@ A task may set `verify`, a shell command that runs after the agent exits. Exit c
 Tasks without `verify` run in the current working tree, as before, and report `verified=n/a`.
 
 Results depend on the model, the repository, and the task set. Run enough tasks and repeats to see the variance before drawing conclusions.
+
+#### Live mode: with and without Tokio
+
+`--mode live` measures Tokio as agents actually use it. Both arms get the same task text; only the setup differs:
+
+- **off**: `--strict-mcp-config` with no MCP servers, and `--settings` with `disableAllHooks`, so no Tokio hooks run, even ones the repository's own settings register.
+- **on**: `--strict-mcp-config` with the Tokio MCP server rooted in the run's workspace, the Tokio `PreToolUse`, `PostToolUse`, and `UserPromptSubmit` hooks, and `--allowedTools mcp__tokio`.
+- Both arms get `--permission-mode acceptEdits` and the secret-file `Read` deny rules, so they differ only in Tokio.
+
+Every live run gets its own throwaway workspace, with `.tokio/map.md` and `.tokio/map-prompts.json` copied in even when they are not committed. Live mode defaults to 3 repeats and reports, per task, the median billable tokens per arm with the lowest and highest run, verify passes, and the on/off ratio; then the median ratio across tasks and the pass rate per arm. The on arm also records Tokio tool calls per tool from its own audit log (`--out` saves them).
+
+A task can be rebuilt from a real fix commit, SWE-bench style:
+
+```json
+[
+  { "id": "loan-schedules", "task": "Editing a loan entry wipes its payout deduction schedules. Preserve them on update.",
+    "commit": "bd47831e", "verify": "php vendor/bin/phpunit tests/Feature/LoanEntry/UpdateLoanEntryTest.php" }
+]
+```
+
+The workspace starts at the commit's parent, and the commit's test files are checked out on top: by default every file it changed under a tests folder, or the files listed in `"tests"`. Run `tokio bench <tasks.json> --check` first. Without starting an agent, it confirms each commit task's tests fail before the fix and pass at the fix; a task that already passes measures nothing.
+
+- `--share <folder>` links another ignored folder, such as `vendor`, into each workspace (`node_modules` is always linked).
+- `--copy <file>` copies an ignored file, such as a test environment file, into each workspace. It may hold credentials, so name it only when the tests need it. Both arms deny `Read` on secret files, and the on arm's hook also blocks Bash reads of them. The off arm has no hook, so a Bash command such as `cat` can still read the file there.
+- Runs are sequential, so arms that share one test database do not collide.
+- Verify commands run through the system shell, `cmd.exe` on Windows: write `php vendor/bin/phpunit …`, not `./vendor/bin/phpunit …`.
+- Each live run is a full headless agent session and is billed as one. Five tasks with three repeats is 30 sessions.
 
 ## Create and install a local VSIX
 

@@ -28,11 +28,13 @@ export interface InitOptions {
 export const AGENTS_BEGIN = '<!-- tokio:begin -->';
 export const AGENTS_END = '<!-- tokio:end -->';
 export const PRE_TOOL_MATCHER = 'Read|Edit|Write|MultiEdit|NotebookEdit|Grep|Glob|Bash|PowerShell|SendMessage';
+/** Tools whose output the PostToolUse hook compacts. */
+export const OUTPUT_TOOL_MATCHER = 'Bash|PowerShell';
 /**
  * Per-user files that never belong in version control: write grants expire per machine, and the
  * repository map's node positions are a personal arrangement.
  */
-const PER_USER_FILES = ['.tokio/scope.json', '.tokio/layout.json', '.tokio/messaging.json'];
+const PER_USER_FILES = ['.tokio/scope.json', '.tokio/layout.json', '.tokio/messaging.json', '.tokio/map-session.json'];
 const SERVER_NAME = 'tokio';
 const CODEX_TABLE = '[mcp_servers.tokio]';
 
@@ -161,7 +163,8 @@ function planClaudeSettings(text: string | undefined, cli: string, force: boolea
 
   const events: { event: string; subcommand: string; matcher?: string }[] = [
     { event: 'PreToolUse', subcommand: 'hook', matcher: PRE_TOOL_MATCHER },
-    { event: 'UserPromptSubmit', subcommand: 'prompt-hook' }
+    { event: 'UserPromptSubmit', subcommand: 'prompt-hook' },
+    { event: 'PostToolUse', subcommand: 'output-hook', matcher: OUTPUT_TOOL_MATCHER }
   ];
   for (const { event, subcommand, matcher } of events) {
     const command = `node ${shellArg(cli)} ${subcommand}`;
@@ -172,7 +175,7 @@ function planClaudeSettings(text: string | undefined, cli: string, force: boolea
 
     const owned = findOwnedHook(groups, subcommand);
     if (owned) {
-      const missing = matcher === undefined ? [] : toolsMissingFromMatcher(owned.group.matcher);
+      const missing = matcher === undefined ? [] : toolsMissingFromMatcher(owned.group.matcher, matcher);
       if (missing.length > 0) {
         if (!force) {
           conflicts.push(`${event} hook does not cover ${missing.join(', ')}; kept it. Use --force to add them.`);
@@ -241,11 +244,11 @@ function findOwnedHook(
 }
 
 /**
- * Tools from PRE_TOOL_MATCHER that a hook matcher does not match. A missing, empty or `*` matcher matches
+ * Tools from required (PRE_TOOL_MATCHER by default) that a hook matcher does not match. A missing, empty or `*` matcher matches
  * every tool; otherwise Claude Code treats it as a regular expression over the tool name.
  */
-export function toolsMissingFromMatcher(matcher: unknown): string[] {
-  const required = PRE_TOOL_MATCHER.split('|');
+export function toolsMissingFromMatcher(matcher: unknown, requiredMatcher = PRE_TOOL_MATCHER): string[] {
+  const required = requiredMatcher.split('|');
   if (typeof matcher !== 'string' || matcher === '' || matcher === '*') {
     return [];
   }

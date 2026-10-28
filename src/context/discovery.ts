@@ -13,6 +13,11 @@ const SAFE_TEXT_EXTENSIONS = new Set([
 
 const SECRET_PATH_PATTERN = /(^|\/)(?:\.env(?:\.[^/]*)?|\.npmrc|credentials?(?:\.[^/]*)?|secrets?(?:\.[^/]*)?)(?:\/|$)|\.(?:key|pem|p12|pfx)$/i;
 
+/** True for words too common to tell files apart, such as "the" or "fix". Expects lowercase. */
+export function isStopWord(word: string): boolean {
+  return STOP_WORDS.has(word);
+}
+
 export function extractSearchTerms(rawPrompt: string): string[] {
   const words = rawPrompt.toLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) ?? [];
   return [...new Set(words
@@ -170,7 +175,8 @@ function isDirectImportPath(path: string, imports: readonly string[]): boolean {
   return imports.some((imported) => imported && (stem === imported || lower.endsWith(`/${imported}`)));
 }
 
-function normalizeTerm(word: string): string {
+/** Strips a plural or -ed/-ing ending, so "routes" and "route" match. */
+export function normalizeTerm(word: string): string {
   if (word.length > 4 && word.endsWith('s') && !word.endsWith('ss')) {
     return word.slice(0, -1);
   }

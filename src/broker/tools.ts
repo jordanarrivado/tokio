@@ -5,6 +5,8 @@ import { classifyWorkCategory } from '../core/category';
 import type { Mode, PromptTarget, WorkCategory } from '../core/types';
 import { countTermHits, extractSearchTerms } from '../context/discovery';
 import { buildRepoMap, extractSymbols, symbolName, type RepoFile } from '../context/repomap';
+import { formatMapRouting, MAP_PATH, rankMapAreas, type MapRouting } from '../context/archmap';
+import { loadArchitectureMap, resolveAgainstRepo } from './mapfile';
 import { estimateTokens } from '../core/tokens';
 import { appendAuditEntry } from './audit';
 import { findMissingRepos, formatCatalog, loadCatalog } from './catalog';
@@ -16,6 +18,7 @@ import { detectValidationCommands } from '../context/project';
 import { findRelevantFiles, formatRoutePlan, planRoute } from '../context/routing';
 import { ASK_TIMEOUT_MS, buildAskPrompt, MAX_ANSWER_CHARS, parseAnswer, runAnswerAgent } from './ask';
 import { ownRepo, readConnections, resolveRepoName } from './messaging';
+import { readSavedOutput } from './compact';
 
 export interface ToolDefinition {
   name: string;
@@ -89,13 +92,15 @@ const TOOLS: readonly ToolDefinition[] = [
   },
   {
     name: 'repo_map',
-    description: 'Ranked repository map of files and top-level signatures (with line numbers) for a task, within a token budget.',
+    description: 'Ranked repository map of files and top-level signatures (with line numbers) for a task, within a token budget. '
+      + `Uses the repository's architecture map (${MAP_PATH}) when it exists, so matched routes come first with exact lines; mapPath picks another map.`,
     inputSchema: {
       type: 'object',
       properties: {
         task: { type: 'string' },
         repo: { type: 'string' },
         targetPath: { type: 'string' },
+        mapPath: { type: 'string', description: `Workspace-relative architecture map (.md). Defaults to ${MAP_PATH}.` },
         budgetTokens: { type: 'integer', minimum: 200, maximum: MAX_BUDGET_TOKENS }
       },
       required: ['task']
@@ -118,7 +123,7 @@ const TOOLS: readonly ToolDefinition[] = [
   },
   {
     name: 'search_output',
-    description: 'Search the rest of a truncated read by its output id.',
+    description: 'Search the rest of a truncated read or a compacted command output by its output id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -331,12 +336,19 @@ export class Broker {
     // Without a repo, the map covers only the repositories the task is about. repo: "*" keeps them all.
     const picked = multi && repo === undefined ? pickReposForTask(selection, fullScan.files, task) : undefined;
     const scan = picked ? narrowScan(fullScan, picked) : fullScan;
+    const mapPath = optionalString(args, 'mapPath');
+    const writeRepo = catalog.repos.find((candidate) => candidate.name === catalog.defaultRepo);
+    const routing = await this.routeFromMap(mapPath, task, fullScan.files, {
+      root: writeRepo?.path ?? this.root,
+      ...(multi ? { prefix: catalog.defaultRepo } : {})
+    }, signal);
     const map = buildRepoMap(scan.files, {
       task,
       // With one repository the target is matched as given, as before catalogs existed.
       targetPath: multi && targetPath !== undefined ? scopeIn(selection, repo, targetPath) : targetPath,
       budgetTokens,
       coChange: scan.coChange,
+      pinnedPaths: routing?.anchors.map((anchor) => anchor.path),
       ...(multi ? { edges: scan.edges, preferPrefix: `${catalog.defaultRepo}/`, formatPath: (path: string) => displayPath(true, path) } : {})
     });
 
@@ -346,12 +358,39 @@ export class Broker {
       map.omittedFiles > 0 ? `${map.omittedFiles} ranked files omitted by budget` : undefined
     ].filter((note): note is string => note !== undefined);
     const footer = `[${map.tokens} tokens${notes.length > 0 ? `; ${notes.join('; ')}` : ''}]`;
+    const routed = routing ? `${formatMapRouting(routing, (path) => displayPath(multi, path))}\n\n` : '';
     // Baseline: the full text of every file the map lists, which is what reading them would cost.
-    const listed = new Set(map.files);
-    const baselineTokens = scan.files
+    const listed = new Set([...map.files, ...(routing?.anchors.map((anchor) => anchor.path) ?? [])]);
+    const baselineTokens = fullScan.files
       .filter((file) => listed.has(file.path))
       .reduce((total, file) => total + estimateTokens(file.content), 0);
-    return { text: `${map.text}\n${footer}`, files: map.files, baselineTokens, repos: reposOf(multi, map.files) };
+    return { text: `${routed}${map.text}\n${footer}`, files: [...listed], baselineTokens, repos: reposOf(multi, [...listed]) };
+  }
+
+  /**
+   * Routes the task through an architecture map: the write target's own map by default, or mapPath in this
+   * workspace. The map and every routed file go through the same path policy as read_symbol. Without a default
+   * map, or when no area matches, the result is undefined and repo_map is unchanged. An explicit map always reports.
+   */
+  private async routeFromMap(
+    mapPath: string | undefined,
+    task: string,
+    files: readonly RepoFile[],
+    target: { root: string; prefix?: string },
+    signal: AbortSignal
+  ): Promise<MapRouting | undefined> {
+    const map = await loadArchitectureMap(mapPath === undefined ? target.root : this.root, mapPath, signal);
+    if (!map) {
+      return undefined;
+    }
+    if (map.areas.length === 0) {
+      if (mapPath === undefined) {
+        return undefined;
+      }
+      throw new Error(`${map.path} has no areas. Use "## Area" headings with "- label -> path#symbol" lines.`);
+    }
+    const routing = await resolveAgainstRepo(rankMapAreas(map.areas, task), files, target, task, signal);
+    return routing.areas.length > 0 || mapPath !== undefined ? routing : undefined;
   }
 
   private async readSymbol(args: Record<string, unknown>, signal: AbortSignal): Promise<ToolOutcome> {
@@ -401,11 +440,12 @@ export class Broker {
     return { text, files: [audited], baselineTokens, repos: reposOf(multi, [audited]) };
   }
 
-  private searchOutput(args: Record<string, unknown>): ToolOutcome {
+  private async searchOutput(args: Record<string, unknown>): Promise<ToolOutcome> {
     const id = requireString(args, 'id');
     const query = requireString(args, 'query');
     const limit = optionalInteger(args, 'limit', 3);
-    const stored = this.storedOutputs.get(id);
+    // run- ids are command outputs the PostToolUse hook saved to disk.
+    const stored = this.storedOutputs.get(id) ?? await readSavedOutput(id);
     if (stored === undefined) {
       throw new Error(`No stored output with id ${id}. It may have expired when the server restarted.`);
     }

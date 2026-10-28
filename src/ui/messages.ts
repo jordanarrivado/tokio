@@ -22,12 +22,36 @@ export interface ContextScanner {
     targetPath: string;
     scope: 'targeted' | 'architecture';
   }): Promise<ContextPreview>;
+  /** Routes the task through the workspace's architecture map. Undefined when there is no usable map. */
+  routeMap?(input: { rawPrompt: string }): Promise<MapContext | undefined>;
+  /** Checks the whole architecture map for the status line. */
+  mapStatus?(): Promise<MapStatus>;
+}
+
+export interface MapStatus {
+  path: string;
+  exists: boolean;
+  areas: number;
+  routes: number;
+  stale: string[];
+  error?: string;
+}
+
+export interface MapContext {
+  /** Matched area names, best first. Empty when nothing in the map matched the task. */
+  areas: string[];
+  routes: string[];
+  stale: string[];
 }
 
 export interface EditorTools {
   getActiveFilePath(): string | undefined;
   getSelectedText(): string | undefined;
   getDiagnosticsText?(): string | undefined;
+  /** Opens the architecture map, creating it from a template when missing. Returns its workspace-relative path. */
+  openArchitectureMap?(): PromiseLike<string>;
+  /** Asks the user's agent to write or rewrite the architecture map. Returns what happened, for the status line. */
+  generateArchitectureMap?(): PromiseLike<string>;
   openText(text: string): PromiseLike<void>;
 }
 
@@ -58,13 +82,18 @@ interface ScanContextRequest {
   scope: 'targeted' | 'architecture';
 }
 
-type ToolName = 'activeFile' | 'editorSelection' | 'diagnostics' | 'openInEditor';
+type ToolName = 'activeFile' | 'editorSelection' | 'diagnostics' | 'architectureMap' | 'generateMap' | 'openInEditor';
 
 interface ToolRequest {
   type: 'tool';
   requestId: number;
   tool: ToolName;
   text?: string;
+}
+
+interface MapStatusRequest {
+  type: 'mapStatus';
+  requestId: number;
 }
 
 interface ClassifyRequest {
@@ -145,6 +174,11 @@ export type WebviewResponse =
       message: string;
     }
   | {
+      type: 'mapStatusResult';
+      requestId: number;
+      status: MapStatus;
+    }
+  | {
       type: 'classificationResult';
       requestId: number;
       classification: CategoryClassification;
@@ -172,6 +206,14 @@ export async function handleWebviewRequest(
 ): Promise<WebviewResponse | undefined> {
   if (isReposRequest(message)) {
     return useRepoCatalog(message, repoCatalog);
+  }
+
+  if (isRecord(message) && message.type === 'mapStatus' && Number.isSafeInteger(message.requestId)) {
+    const request = message as unknown as MapStatusRequest;
+    const status = contextScanner?.mapStatus
+      ? await contextScanner.mapStatus()
+      : { path: '.tokio/map.md', exists: false, areas: 0, routes: 0, stale: [], error: 'Architecture maps are unavailable here.' };
+    return { type: 'mapStatusResult', requestId: request.requestId, status };
   }
 
   if (isClassifyRequest(message)) {
@@ -223,6 +265,7 @@ export async function handleWebviewRequest(
   try {
     const classification = classifyWorkCategory(message.rawPrompt);
     const category = message.category ?? classification.category;
+    const repositoryContext = await withMapRoutes(message, contextScanner);
     const result = refinePrompt({
       rawPrompt: message.rawPrompt,
       targetPath: message.targetPath,
@@ -232,7 +275,7 @@ export async function handleWebviewRequest(
       outputStyle: message.outputStyle,
       target: message.target,
       acceptanceCriteria: message.acceptanceCriteria,
-      repositoryContext: message.repositoryContext
+      repositoryContext
     });
     return {
       type: 'refineResult',
@@ -249,6 +292,25 @@ export async function handleWebviewRequest(
       message: error instanceof Error ? error.message : 'Unable to refine this prompt.'
     };
   }
+}
+
+/**
+ * Adds the workspace architecture map's routes to the repository context. Without a map, or when no area
+ * matches, the context is returned as sent. A map that cannot be read never blocks a refine; the status line reports it.
+ */
+async function withMapRoutes(
+  message: RefineRequest,
+  contextScanner: ContextScanner | undefined
+): Promise<RepositoryContext | undefined> {
+  const routed = await contextScanner?.routeMap?.({ rawPrompt: message.rawPrompt }).catch(() => undefined);
+  if (!routed || routed.areas.length === 0) {
+    return message.repositoryContext;
+  }
+  return {
+    ...(message.repositoryContext ?? { scope: 'targeted', files: [] }),
+    mapRoutes: routed.routes,
+    mapStale: routed.stale
+  };
 }
 
 async function useRepoCatalog(
@@ -349,6 +411,28 @@ async function useEditorTool(
     return selection
       ? toolResult(message, true, 'Loaded the current editor selection.', selection)
       : toolResult(message, false, 'Select text in an editor first.');
+  }
+
+  if (message.tool === 'generateMap') {
+    try {
+      const sent = await editorTools.generateArchitectureMap?.();
+      return sent
+        ? toolResult(message, true, sent)
+        : toolResult(message, false, 'Map generation is unavailable here.');
+    } catch (error: unknown) {
+      return toolResult(message, false, error instanceof Error ? error.message : 'Could not send the map request.');
+    }
+  }
+
+  if (message.tool === 'architectureMap') {
+    try {
+      const path = await editorTools.openArchitectureMap?.();
+      return path
+        ? toolResult(message, true, `Opened ${path}. Saving it updates the map status.`, path)
+        : toolResult(message, false, 'Architecture maps are unavailable here.');
+    } catch (error: unknown) {
+      return toolResult(message, false, error instanceof Error ? error.message : 'Could not open the architecture map.');
+    }
   }
 
   if (message.tool === 'diagnostics') {
@@ -465,6 +549,8 @@ function isToolRequest(message: unknown): message is ToolRequest {
   const validTool = message.tool === 'activeFile'
     || message.tool === 'editorSelection'
     || message.tool === 'diagnostics'
+    || message.tool === 'architectureMap'
+    || message.tool === 'generateMap'
     || message.tool === 'openInEditor';
   return message.type === 'tool'
     && Number.isSafeInteger(message.requestId)
@@ -539,6 +625,10 @@ function isRepositoryContext(value: unknown): value is RepositoryContext | undef
   if (!Array.isArray(value.files)
     || value.files.length > 5
     || !value.files.every((file) => typeof file === 'string' && file.length <= 1000)) {
+    return false;
+  }
+  // Map routes are added by the extension after validation; the webview never sends them.
+  if (value.mapRoutes !== undefined || value.mapStale !== undefined) {
     return false;
   }
   return (value.architectureNotes === undefined

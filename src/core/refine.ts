@@ -5,6 +5,7 @@ const DEFAULT_CATEGORY: WorkCategory = 'general';
 const DEFAULT_OUTPUT_STYLE: OutputStyle = 'compact';
 const DEFAULT_TARGET: PromptTarget = 'generic';
 const MAX_VALIDATION_COMMANDS = 3;
+const MAX_MAP_ROUTES = 12;
 
 const CATEGORY_LABELS: Record<WorkCategory, string> = {
   general: 'General',
@@ -289,8 +290,10 @@ function formatRepositoryContext(
     return undefined;
   }
 
+  // Files a map route already names are not listed again.
+  const routedFiles = new Set((context.mapRoutes ?? []).map((route) => route.split(/[\s:]/)[0]));
   const uniqueFiles = [...new Set(context.files.map((file) => file.trim()).filter(Boolean))]
-    .filter((file) => file !== targetPath)
+    .filter((file) => file !== targetPath && !routedFiles.has(file))
     .slice(0, 3);
   const relatedTests = [...new Set((context.relatedTests ?? []).map((file) => file.trim()).filter(Boolean))]
     .filter((file) => file !== targetPath && !uniqueFiles.includes(file))
@@ -302,6 +305,16 @@ function formatRepositoryContext(
     ? 'Related files (verify):'
     : 'Repository context (discovered locally; verify before editing):';
   const lines: string[] = [];
+  const mapRoutes = (context.mapRoutes ?? []).slice(0, MAX_MAP_ROUTES);
+  const mapStale = (context.mapStale ?? []).slice(0, MAX_MAP_ROUTES);
+
+  if (mapRoutes.length > 0) {
+    lines.push(`Architecture map routes (start here; read only these lines):\n${mapRoutes.map((route) => `- ${route}`).join('\n')}`);
+  }
+
+  if (mapStale.length > 0) {
+    lines.push(`Map entries not found (the map may be out of date): ${mapStale.join('; ')}.`);
+  }
 
   if (uniqueFiles.length > 0) {
     const filesHeading = outputStyle === 'compact' ? '' : 'Suggested starting files:\n';
