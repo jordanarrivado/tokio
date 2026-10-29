@@ -178,7 +178,7 @@ Keywords: panel, sidebar, webview, ui, compose, refine button, copy, chips, work
 - workspace context scan -> src/context/workspace.ts#WorkspaceContextService
 - Related: package.json, src/ui/messages.test.ts
 
-## Repository map view (graph editor)
+## Repository map view (graph editor) 
 Keywords: repository map, graph, nodes, drag, layout, links, activity, working, open map, line shape, map settings
 - map editor tab -> src/ui/map.ts#RepositoryMapPanel
 - catalog service for the UI -> src/ui/repos.ts#createRepoCatalogService

@@ -14,7 +14,7 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.commands.executeCommand('workbench.view.extension.tokio');
     }),
     vscode.commands.registerCommand(OPEN_MAP_COMMAND, () => {
-      RepositoryMapPanel.show(provider.repoCatalog, () => provider.notifyReposChanged());
+      RepositoryMapPanel.show(provider.repoCatalog, () => provider.notifyReposChanged(), context.extensionUri);
     })
   );
 }

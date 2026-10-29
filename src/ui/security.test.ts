@@ -51,5 +51,7 @@ test('repository map has the same restrictive policy and text-only rendering as 
   assert.doesNotMatch(mapSource, /innerHTML|outerHTML|insertAdjacentHTML/);
   assert.doesNotMatch(mapSource, /https?:\/\//);
   assert.doesNotMatch(mapSource, /\bfetch\s*\(|XMLHttpRequest|WebSocket|sendBeacon/);
-  assert.match(mapSource, /localResourceRoots: \[\]/);
+  // The only local resource is the vendored lottie player.
+  assert.match(mapSource, /localResourceRoots: \[vendorRoot\]/);
+  assert.match(mapSource, /VENDOR_DIRECTORY = \['out', 'vendor'\]/);
 });

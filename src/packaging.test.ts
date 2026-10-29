@@ -10,6 +10,8 @@ test('packaged extension activates and renders its view without development file
   const files = await listFiles({ cwd: process.cwd(), packagedDependencies: [] });
   assert.ok(!files.some((file) => /^(?:node_modules|src|\.worktrees)\//.test(file)));
   assert.ok(!files.some((file) => file.endsWith('.test.js')));
+  // The repository map plays its activity icons with the vendored lottie player.
+  assert.ok(files.includes('out/vendor/lottie_light.min.js'));
   const directory = await mkdtemp(join(tmpdir(), 'tokio-package-'));
   try {
     // Only stage runtime JavaScript selected by the real VSIX packaging rules.

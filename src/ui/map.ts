@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 
 import * as vscode from 'vscode';
 
+import { buildMascots, buildRobots } from './mascot';
 import { handleWebviewRequest } from './messages';
 import type { RepoCatalogService } from './repos';
 
@@ -18,6 +19,9 @@ const MUTATING_ACTIONS = new Set([
 
 /** How often the open map rereads the audit log to show which repository an agent is working in. */
 const ACTIVITY_POLL_MS = 2_000;
+/** lottie-web's light SVG player, copied from node_modules at build time. It plays the activity icons. */
+const VENDOR_DIRECTORY = ['out', 'vendor'];
+const LOTTIE_FILE = 'lottie_light.min.js';
 
 export class RepositoryMapPanel {
   private static current: RepositoryMapPanel | undefined;
@@ -26,9 +30,11 @@ export class RepositoryMapPanel {
   private constructor(
     private readonly panel: vscode.WebviewPanel,
     private readonly service: RepoCatalogService,
-    private readonly onChanged: () => void
+    private readonly onChanged: () => void,
+    vendorRoot: vscode.Uri
   ) {
-    panel.webview.html = getMapHtml(panel.webview.cspSource);
+    const lottieUri = panel.webview.asWebviewUri(vscode.Uri.joinPath(vendorRoot, LOTTIE_FILE)).toString();
+    panel.webview.html = getMapHtml(panel.webview.cspSource, lottieUri);
     panel.webview.onDidReceiveMessage((message: unknown) => {
       void this.handleMessage(message);
     });
@@ -63,17 +69,18 @@ export class RepositoryMapPanel {
     }
   }
 
-  public static show(service: RepoCatalogService, onChanged: () => void): void {
+  public static show(service: RepoCatalogService, onChanged: () => void, extensionUri: vscode.Uri): void {
     if (RepositoryMapPanel.current) {
       RepositoryMapPanel.current.panel.reveal(vscode.ViewColumn.Active);
       return;
     }
+    const vendorRoot = vscode.Uri.joinPath(extensionUri, ...VENDOR_DIRECTORY);
     const panel = vscode.window.createWebviewPanel('tokio.repositoryMap', 'Tokio: Repository Map', vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
-      localResourceRoots: []
+      localResourceRoots: [vendorRoot]
     });
-    RepositoryMapPanel.current = new RepositoryMapPanel(panel, service, onChanged);
+    RepositoryMapPanel.current = new RepositoryMapPanel(panel, service, onChanged, vendorRoot);
   }
 
   /** Tells an open map that the catalog changed elsewhere, such as in the sidebar. */
@@ -94,14 +101,14 @@ export class RepositoryMapPanel {
   }
 }
 
-function getMapHtml(cspSource: string): string {
+function getMapHtml(cspSource: string, lottieUri: string): string {
   const nonce = randomBytes(16).toString('hex');
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${cspSource}; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}' ${cspSource};">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Repository Map</title>
   <style nonce="${nonce}">
@@ -130,7 +137,7 @@ function getMapHtml(cspSource: string): string {
       --edit: #a2e61b;
       --mono: var(--vscode-editor-font-family, monospace);
       --radius: 10px;
-      --node-width: 230px;
+      --node-width: 250px;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; }
@@ -363,6 +370,20 @@ function getMapHtml(cspSource: string): string {
       font-size: 0.78em;
       font-weight: 800;
     }
+    /* The activity icon replaces the initials. Its shapes are one color, painted with the card's glow. */
+    .tile[data-pose] {
+      padding: 4px;
+      color: var(--glow, var(--active));
+      background: color-mix(in srgb, var(--glow, var(--active)) 14%, var(--field));
+    }
+    .node[data-activity="recent"] .tile[data-pose] { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, var(--field)); }
+    .tile[data-pose] svg, .robot svg { display: block; }
+    .tile[data-pose] path, .robot path { fill: currentColor; }
+    .tile[data-pose] path[stroke-width], .robot path[stroke-width] { stroke: currentColor; }
+    /* The robot acts out the same activity beside the name, and naps while the repository is idle. */
+    .robot { width: 38px; height: 38px; flex: 0 0 38px; margin: -2px 0; color: var(--glow, var(--active)); }
+    .robot[data-pose="idle"] { color: var(--muted); opacity: 0.6; }
+    .node[data-activity="recent"] .robot { color: var(--ok); }
     .node-copy { display: grid; min-width: 0; flex: 1; }
     .node-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .node-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--mono); font-size: 0.8em; }
@@ -605,11 +626,14 @@ function getMapHtml(cspSource: string): string {
     </aside>
   </div>
 
+  <script nonce="${nonce}" src="${lottieUri}"></script>
   <script nonce="${nonce}">
     (() => {
       const vscode = acquireVsCodeApi();
+      const MASCOTS = ${JSON.stringify(buildMascots())};
+      const ROBOTS = ${JSON.stringify(buildRobots())};
       const SVG = 'http' + '://www.w3.org/2000/svg';
-      const NODE_WIDTH = 230;
+      const NODE_WIDTH = 250;
       const NODE_HEIGHT = 92;
       const viewport = document.getElementById('viewport');
       const board = document.getElementById('board');
@@ -957,6 +981,8 @@ function getMapHtml(cspSource: string): string {
       };
 
       const renderNodes = () => {
+        players.forEach((player) => player.anim.destroy());
+        players.clear();
         nodesLayer.replaceChildren();
         emptyBoard.hidden = graph.repos.length > 0;
         graph.repos.forEach((repo) => {
@@ -976,7 +1002,9 @@ function getMapHtml(cspSource: string): string {
           const copy = element('div', 'node-copy');
           copy.append(element('strong', '', repo.name), element('span', '', repo.path));
           copy.title = repo.path + (repo.purpose ? ' · ' + repo.purpose : '');
-          head.append(tile, copy, element('span', 'dot'));
+          const robot = element('span', 'robot');
+          robot.setAttribute('aria-hidden', 'true');
+          head.append(tile, copy, robot, element('span', 'dot'));
           const chip = element('span', 'chip', state === 'write' ? 'write target' : state === 'granted' ? 'edits allowed' : state === 'missing' ? 'missing' : 'read-only');
           const port = element('span', 'port');
           port.title = 'Drag onto another repository: ' + repo.name + ' depends on it';
@@ -1023,12 +1051,67 @@ function getMapHtml(cspSource: string): string {
         return 'Used ' + (minutes < 1 ? 'under a minute' : minutes + ' min') + ' ago';
       };
 
+      // The tile's activity icon follows the tool: searching and messaging read nothing worth naming as a file.
+      const SEARCH_TOOLS = /^(Grep|Glob|WebSearch|WebFetch)$|(repo_map|find_symbol|search_output)$/;
+      const MESSAGE_TOOLS = /^SendMessage$|ask_repo$/;
+      const poseFor = (entry) => {
+        if (!entry) return '';
+        if (entry.state === 'blocked') return 'blocked';
+        if (entry.state === 'recent') return 'done';
+        if (MESSAGE_TOOLS.test(entry.tool)) return 'messaging';
+        if (entry.action === 'reading' && SEARCH_TOOLS.test(entry.tool)) return 'searching';
+        return MASCOTS[entry.action] ? entry.action : 'reading';
+      };
+
+      // One player per tile and robot, kept while its pose holds, so each poll does not restart it.
+      const players = new Map();
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+      // Returns false when nothing plays: no pose, or no player script.
+      function play(key, box, pose, data) {
+        const current = players.get(key);
+        if (current && current.pose === pose && current.box === box) return true;
+        if (current) {
+          current.anim.destroy();
+          players.delete(key);
+        }
+        if (!pose || !data || !window.lottie) return false;
+        box.replaceChildren();
+        box.dataset.pose = pose;
+        const anim = window.lottie.loadAnimation({
+          container: box,
+          renderer: 'svg',
+          loop: data.loop,
+          autoplay: !reducedMotion.matches,
+          // The player marks the data it loads, so each card gets its own copy.
+          animationData: structuredClone(data),
+          rendererSettings: { preserveAspectRatio: 'xMidYMid meet', focusable: false }
+        });
+        if (reducedMotion.matches) anim.goToAndStop(data.still, true);
+        const svg = box.querySelector('svg');
+        if (svg) svg.setAttribute('aria-hidden', 'true');
+        players.set(key, { pose, anim, box });
+        return true;
+      }
+
+      function setMascot(node, name, pose, missing) {
+        const tile = node.querySelector('.tile');
+        // Without a pose or the player, the tile keeps its initials.
+        if (!play('tile:' + name, tile, pose, MASCOTS[pose])) {
+          delete tile.dataset.pose;
+          tile.textContent = initials(name);
+        }
+        const robot = node.querySelector('.robot');
+        const robotPose = missing ? '' : pose || 'idle';
+        robot.hidden = !play('robot:' + name, robot, robotPose, ROBOTS[robotPose]);
+      }
+
       // Activity changes the card in place, so a drag in progress keeps its node.
       function setNodeActivity(node, repo, state) {
         const entry = activity[repo.name];
         const line = node.querySelector('.activity');
         line.hidden = !entry;
         line.textContent = entry ? activityText(entry) : '';
+        setMascot(node, repo.name, repo.missing ? '' : poseFor(entry), repo.missing);
         if (entry) {
           node.dataset.activity = entry.state;
           node.dataset.action = entry.action || 'reading';
