@@ -89,6 +89,10 @@ export class RepositoryMapPanel {
   }
 
   private async handleMessage(message: unknown): Promise<void> {
+    if (isMapCommand(message)) {
+      await this.panel.webview.postMessage(await this.runCommand(message));
+      return;
+    }
     const response = await handleWebviewRequest(message, { writeText: async () => {} }, undefined, undefined, this.service);
     if (!response) {
       return;
@@ -99,6 +103,55 @@ export class RepositoryMapPanel {
       this.onChanged();
     }
   }
+
+  /** Copy a repository's path, or show its folder in the OS file explorer. The path comes from the catalog, not the page. */
+  private async runCommand(message: MapCommand): Promise<MapCommandResult> {
+    const reply = (success: boolean, text: string): MapCommandResult => ({ type: 'mapResult', requestId: message.requestId, success, message: text });
+    try {
+      const repo = (await this.service.list()).repos.find((candidate) => candidate.name === message.name);
+      if (!repo) {
+        return reply(false, `${message.name} is not in the catalog.`);
+      }
+      if (message.command === 'copyPath') {
+        await vscode.env.clipboard.writeText(repo.path);
+        return reply(true, `Copied the path of ${repo.name}.`);
+      }
+      if (repo.missing) {
+        return reply(false, `The folder for ${repo.name} is missing.`);
+      }
+      await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(repo.path));
+      return reply(true, `Opened ${repo.name} in the file explorer.`);
+    } catch (error: unknown) {
+      return reply(false, error instanceof Error ? error.message : 'Could not run that command.');
+    }
+  }
+}
+
+interface MapCommand {
+  type: 'map';
+  requestId: number;
+  command: 'copyPath' | 'openFolder';
+  name: string;
+}
+
+interface MapCommandResult {
+  type: 'mapResult';
+  requestId: number;
+  success: boolean;
+  message: string;
+}
+
+function isMapCommand(message: unknown): message is MapCommand {
+  if (typeof message !== 'object' || message === null) {
+    return false;
+  }
+  const value = message as Record<string, unknown>;
+  return value.type === 'map'
+    && Number.isSafeInteger(value.requestId)
+    && (value.command === 'copyPath' || value.command === 'openFolder')
+    && typeof value.name === 'string'
+    && value.name.length > 0
+    && value.name.length <= 64;
 }
 
 function getMapHtml(cspSource: string, lottieUri: string): string {
@@ -113,31 +166,36 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
   <title>Repository Map</title>
   <style nonce="${nonce}">
     :root {
-      --bg: var(--vscode-editor-background, #1f1f1f);
-      --surface: var(--vscode-editorWidget-background, #252526);
-      --field: var(--vscode-input-background, #2a2a2a);
+      --bg: var(--vscode-editor-background, #0f1117);
+      --surface: var(--vscode-sideBar-background, var(--vscode-editorWidget-background, #14161c));
+      --card: var(--vscode-editorWidget-background, #181b22);
+      --field: var(--vscode-input-background, #1d2028);
       --field-fg: var(--vscode-input-foreground, var(--text));
-      --border: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.3)));
-      --border-strong: var(--vscode-input-border, var(--border));
-      --text: var(--vscode-foreground, #cccccc);
-      --muted: var(--vscode-descriptionForeground, #9d9d9d);
-      --accent: var(--vscode-button-background, #0e639c);
-      --accent-fg: var(--vscode-button-foreground, #ffffff);
-      --accent-hover: var(--vscode-button-hoverBackground, #1177bb);
-      --accent-text: var(--vscode-textLink-foreground, #3794ff);
+      --border: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128, 128, 128, 0.22)));
+      --border-strong: color-mix(in srgb, var(--text) 16%, transparent);
+      --text: var(--vscode-foreground, #e6e8ee);
+      --muted: var(--vscode-descriptionForeground, #8b90a0);
+      --accent: #4f6bff;
+      --accent-fg: #ffffff;
+      --accent-hover: #3f5af0;
+      --accent-text: #8197ff;
+      --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+      --link: var(--vscode-charts-blue, #3ba8ff);
       --secondary: var(--vscode-button-secondaryBackground, #3a3d41);
       --secondary-fg: var(--vscode-button-secondaryForeground, var(--text));
       --secondary-hover: var(--vscode-button-secondaryHoverBackground, #45494e);
       --hover: var(--vscode-toolbar-hoverBackground, rgba(128, 128, 128, 0.14));
-      --focus: var(--vscode-focusBorder, #007fd4);
-      --ok: var(--vscode-testing-iconPassed, #73c991);
-      --warn: var(--vscode-editorWarning-foreground, #cca700);
-      --danger: var(--vscode-errorForeground, #f48771);
+      --focus: var(--vscode-focusBorder, #4f6bff);
+      --ok: #22c55e;
+      --ok-soft: color-mix(in srgb, var(--ok) 15%, transparent);
+      --warn: var(--vscode-editorWarning-foreground, #e0a91b);
+      --danger: var(--vscode-errorForeground, #f2555a);
       --active: var(--vscode-charts-orange, #d18616);
       --edit: #a2e61b;
       --mono: var(--vscode-editor-font-family, monospace);
-      --radius: 10px;
+      --radius: 12px;
       --node-width: 250px;
+      --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; }
@@ -156,30 +214,37 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
-      min-height: 28px;
+      gap: 7px;
+      min-height: 32px;
       border: 1px solid transparent;
-      border-radius: 6px;
-      padding: 4px 11px;
+      border-radius: 8px;
+      padding: 4px 12px;
       color: var(--accent-fg);
       background: var(--accent);
       font: inherit;
       font-weight: 600;
+      white-space: nowrap;
       cursor: pointer;
     }
     button:hover:not(:disabled) { background: var(--accent-hover); }
     button:disabled { cursor: not-allowed; opacity: 0.45; }
     button.secondary { color: var(--secondary-fg); background: var(--secondary); }
     button.secondary:hover:not(:disabled) { background: var(--secondary-hover); }
-    button.ghost { border-color: var(--border-strong); color: var(--text); background: transparent; font-weight: 500; }
+    button.ghost { border-color: var(--border-strong); color: var(--text); background: color-mix(in srgb, var(--text) 3%, transparent); }
     button.ghost:hover:not(:disabled) { background: var(--hover); }
-    button.compact { min-height: 24px; padding: 2px 8px; font-size: 0.88em; }
-    button:focus-visible, .node:focus-visible { outline: 1px solid var(--focus); outline-offset: 2px; }
+    button.plain { border-color: transparent; color: var(--muted); background: transparent; }
+    button.plain:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+    button.danger { border-color: color-mix(in srgb, var(--danger) 45%, transparent); color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, transparent); }
+    button.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 16%, transparent); }
+    button.icon-only { width: 32px; padding: 0; }
+    button.compact { min-height: 26px; padding: 2px 9px; font-size: 0.86em; }
+    button.block { width: 100%; }
+    button:focus-visible, .node:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
     input, select {
       width: 100%;
       min-width: 0;
       border: 1px solid var(--border-strong);
-      border-radius: 6px;
+      border-radius: 8px;
       padding: 5px 8px;
       color: var(--field-fg);
       background: var(--field);
@@ -187,7 +252,19 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
     }
     input:focus, select:focus { outline: 1px solid var(--focus); outline-offset: -1px; }
     label { font-weight: 600; font-size: 0.9em; }
+    kbd {
+      padding: 1px 6px;
+      border: 1px solid var(--border-strong);
+      border-radius: 5px;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--text) 5%, transparent);
+      font-family: var(--mono);
+      font-size: 0.76em;
+      white-space: nowrap;
+    }
+    .icon { flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
     .hint { margin: 0; color: var(--muted); font-size: 0.86em; }
+    .eyebrow { color: var(--muted); font-size: 0.72em; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
     [hidden] { display: none !important; }
 
     /* Toolbar */
@@ -196,38 +273,56 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       flex-wrap: wrap;
       align-items: center;
       gap: 8px;
-      padding: 10px 14px;
+      padding: 10px 16px;
       border-bottom: 1px solid var(--border);
       background: var(--surface);
     }
-    .toolbar h1 { margin: 0 6px 0 0; font-size: 1rem; }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; border-radius: 8px; color: var(--accent-text); background: var(--accent-soft); }
+    .toolbar h1 { margin: 0; font-size: 1.05rem; font-weight: 700; white-space: nowrap; }
+    .count { padding: 1px 9px; border: 1px solid var(--border-strong); border-radius: 999px; color: var(--muted); font-size: 0.8em; white-space: nowrap; }
     .spacer { flex: 1; }
-    .add-menu { position: relative; }
-    .add-button { width: 30px; min-height: 30px; padding: 0; border-radius: 50%; font-size: 1.2em; }
+    .search {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: min(300px, 100%);
+      height: 32px;
+      padding: 0 6px 0 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      color: var(--muted);
+      background: var(--field);
+      font-weight: 400;
+    }
+    .search:focus-within { border-color: var(--focus); }
+    .search input { flex: 1; padding: 0; border: 0; background: transparent; }
+    .search input:focus { outline: none; }
+    #details-toggle[aria-pressed="true"] { border-color: color-mix(in srgb, var(--accent) 70%, transparent); color: var(--accent-text); background: var(--accent-soft); }
+    .add-menu, .lines-menu { position: relative; }
+    .split { display: flex; }
+    .split > button:first-child { border-radius: 8px 0 0 8px; }
+    .split .caret { width: 28px; padding: 0; border-left-color: color-mix(in srgb, #000000 25%, transparent); border-radius: 0 8px 8px 0; }
     .menu {
       position: absolute;
       top: calc(100% + 6px);
-      left: 0;
-      z-index: 20;
+      right: 0;
+      z-index: 40;
       display: grid;
       gap: 4px;
       min-width: 190px;
       padding: 6px;
       border: 1px solid var(--border-strong);
-      border-radius: 8px;
+      border-radius: 10px;
       background: var(--surface);
-      box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
+      box-shadow: var(--shadow);
     }
     .menu button { justify-content: flex-start; }
-    .legend { display: flex; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 0.82em; }
-    .legend span { display: inline-flex; align-items: center; gap: 5px; }
-    .legend i { display: inline-block; width: 22px; border-top: 2px solid var(--muted); }
-    .legend i.dep { border-top-color: var(--text); }
-    .legend i.link { border-top-color: var(--accent-text); }
-    .legend i.detected { border-top-style: dotted; }
-    .legend i.live { border-top: 3px dotted var(--active); }
-    .legend i.live.editing { border-top-color: var(--edit); }
-    #status { min-height: 1.2em; }
+    .lines-menu .menu { min-width: 230px; gap: 8px; padding: 10px; }
+    .menu-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 0.88em; }
+    .menu-row label { font-weight: 500; }
+    .menu-check { display: flex; align-items: center; gap: 8px; font-size: 0.88em; }
+    .menu-check input { width: auto; }
 
     /* Board */
     .workspace { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; min-height: 0; }
@@ -238,48 +333,90 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       cursor: grab;
       touch-action: none;
       background-color: var(--bg);
-      background-image: radial-gradient(color-mix(in srgb, var(--muted) 30%, transparent) 1px, transparent 1px);
+      background-image: radial-gradient(color-mix(in srgb, var(--muted) 28%, transparent) 1px, transparent 1px);
       background-size: 16px 16px;
     }
     #viewport.panning { cursor: grabbing; }
     #board { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
-    .canvas-controls {
-      position: absolute;
-      right: 12px;
-      bottom: 12px;
-      z-index: 15;
-      display: flex;
-      gap: 4px;
-      padding: 4px;
+    /* Panels float over the canvas: the legend, the hint, the minimap with zoom, and the status toast. */
+    .panel {
       border: 1px solid var(--border-strong);
-      border-radius: 8px;
-      background: var(--surface);
-      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
+      box-shadow: var(--shadow);
+      cursor: default;
     }
-    .canvas-controls button { min-width: 30px; }
-    #zoom-reset { min-width: 54px; font-variant-numeric: tabular-nums; }
-    .canvas-hint { position: absolute; left: 12px; bottom: 14px; z-index: 15; pointer-events: none; }
-    .lines-menu { position: relative; }
-    .lines-menu .menu { min-width: 230px; gap: 8px; padding: 10px; }
-    .menu-row { display: grid; grid-template-columns: 96px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 0.88em; }
-    .menu-row label { font-weight: 500; }
-    .menu-check { display: flex; align-items: center; gap: 8px; font-size: 0.88em; }
-    .menu-check input { width: auto; }
+    .toast { position: absolute; top: 14px; left: 50%; z-index: 16; max-width: 70%; margin: 0; padding: 6px 14px; transform: translateX(-50%); font-size: 0.86em; }
+    .toast:empty { display: none; }
+    .legend { position: absolute; left: 16px; bottom: 16px; z-index: 15; display: grid; width: 216px; padding: 10px 6px 6px; }
+    .legend-head { display: flex; align-items: baseline; justify-content: space-between; padding: 0 8px 6px; }
+    .legend-head .hint { font-size: 0.78em; }
+    button.legend-row {
+      justify-content: flex-start;
+      gap: 10px;
+      min-height: 30px;
+      padding: 4px 8px;
+      border: 0;
+      border-radius: 6px;
+      color: var(--text);
+      background: transparent;
+      font-size: 0.88em;
+      font-weight: 500;
+    }
+    button.legend-row:hover:not(:disabled) { background: var(--hover); }
+    .legend-row .label { flex: 1; text-align: left; }
+    .legend-row .icon { color: var(--muted); }
+    .legend-row[aria-pressed="false"] { color: var(--muted); }
+    .legend-row[aria-pressed="false"] .swatch { opacity: 0.3; }
+    .legend-row[aria-pressed="false"] .icon { visibility: hidden; }
+    .swatch { width: 26px; flex: 0 0 26px; border-top: 2px solid var(--muted); }
+    .swatch.dep { border-top-color: var(--accent-text); }
+    .swatch.link { border-top-color: var(--link); }
+    .swatch.detected { border-top-color: color-mix(in srgb, var(--muted) 80%, transparent); }
+    .swatch.reading { border-top: 2px dashed var(--active); }
+    .swatch.editing { border-top: 2px dashed var(--edit); }
+    .canvas-hint {
+      position: absolute;
+      left: 50%;
+      bottom: 16px;
+      z-index: 14;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin: 0;
+      padding: 5px 12px;
+      transform: translateX(-50%);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 0.8em;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .view-dock { position: absolute; right: 16px; bottom: 16px; z-index: 15; display: grid; justify-items: end; gap: 8px; }
+    .minimap { position: relative; width: 184px; height: 112px; overflow: hidden; cursor: pointer; }
+    .mini-node { position: absolute; border-radius: 3px; background: color-mix(in srgb, var(--text) 22%, transparent); }
+    .mini-node.write { background: color-mix(in srgb, var(--accent) 80%, transparent); }
+    .mini-node.selected { outline: 1.5px solid var(--accent-text); }
+    #mini-view { position: absolute; border: 1.5px solid var(--accent); border-radius: 4px; background: color-mix(in srgb, var(--accent) 8%, transparent); pointer-events: none; }
+    .zoom { display: flex; align-items: center; gap: 2px; padding: 3px; }
+    .zoom button { width: 32px; min-height: 30px; padding: 0; border: 0; color: var(--text); background: transparent; font-weight: 500; }
+    .zoom button:hover:not(:disabled) { background: var(--hover); }
+    #zoom-reset { width: 58px; font-variant-numeric: tabular-nums; }
+    .zoom .sep { width: 1px; height: 18px; margin: 0 3px; background: var(--border-strong); }
     /* Markers take their color from the svg, not the line, so the arrowheads follow this color. */
-    #edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; color: color-mix(in srgb, var(--text) 75%, transparent); }
-    #edge-paths path { fill: none; stroke-width: 2; }
+    #edges { position: absolute; inset: 0; overflow: visible; pointer-events: none; color: var(--accent-text); }
+    #edge-paths path { fill: none; stroke-width: 1.6; stroke-linecap: round; }
     #arrow path { fill: currentColor; stroke: none; }
     /* A lit line's arrowhead matches its flow. */
     #arrow-live path { fill: var(--active); stroke: none; }
     #arrow-editing path { fill: var(--edit); stroke: none; }
     #arrow-blocked path { fill: var(--danger); stroke: none; }
-    #edges .dep { stroke: color-mix(in srgb, var(--text) 70%, transparent); }
-    #edges .link { stroke: var(--accent-text); }
+    #edges .dep { stroke: var(--accent-text); }
+    #edges .link { stroke: var(--link); }
     /* Dash patterns come from the Lines settings, per connection kind. */
     #edges .detected { stroke: color-mix(in srgb, var(--muted) 80%, transparent); }
-    #edge-paths path { stroke-linecap: round; }
     #edges .draft { stroke: var(--accent-text); stroke-dasharray: 6 4; }
-    #edges .selected { stroke-width: 3.5; }
+    #edges .selected { stroke-width: 3; }
     /* Status lines: a missing repository's connectors break up in red; an agent's connectors light up and flow. */
     #edges path.missing { stroke: color-mix(in srgb, var(--danger) 70%, transparent); }
     #edges path.live { stroke: color-mix(in srgb, var(--active) 55%, transparent); }
@@ -294,46 +431,40 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
     #edges path.flow.editing { stroke: var(--edit); filter: drop-shadow(0 0 3px var(--edit)); }
     #edges path.flow.blocked { stroke: var(--danger); filter: drop-shadow(0 0 3px var(--danger)); }
     @keyframes flow { to { stroke-dashoffset: -14; } }
-    .edge-label {
+    button.edge-label {
       position: absolute;
       z-index: 2;
-      transform: translate(-50%, -50%);
-      min-height: 22px;
+      min-height: 20px;
       padding: 1px 9px;
-      border: 1px solid var(--border-strong);
+      transform: translate(-50%, -50%);
+      border: 1px solid color-mix(in srgb, var(--accent-text) 55%, transparent);
       border-radius: 999px;
-      color: var(--muted);
-      background: var(--bg);
-      font-size: 0.78em;
-      font-weight: 500;
-      white-space: nowrap;
+      color: color-mix(in srgb, var(--accent-text) 55%, var(--text));
+      background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+      font-size: 0.72em;
+      font-weight: 600;
     }
-    .edge-label:hover:not(:disabled) { color: var(--text); background: var(--surface); }
-    .edge-label[data-kind="link"] { border-color: color-mix(in srgb, var(--accent-text) 60%, transparent); color: var(--accent-text); }
-    .edge-label[aria-pressed="true"] { border-color: var(--focus); color: var(--text); }
+    button.edge-label:hover:not(:disabled) { border-color: var(--accent-text); background: color-mix(in srgb, var(--accent) 26%, var(--bg)); }
+    .edge-label[data-kind="link"] { border-color: color-mix(in srgb, var(--link) 55%, transparent); color: color-mix(in srgb, var(--link) 60%, var(--text)); background: color-mix(in srgb, var(--link) 12%, var(--bg)); }
+    .edge-label[data-kind="detected"] { border-color: var(--border-strong); color: var(--muted); background: var(--bg); }
+    button.edge-label[aria-pressed="true"] { border-color: var(--accent); color: var(--accent-fg); background: var(--accent); }
 
     .node {
-      --node-color: var(--muted);
+      --tint: var(--accent-text);
       position: absolute;
       z-index: 3;
-      display: grid;
-      gap: 8px;
       width: var(--node-width);
-      padding: 10px 12px;
       border: 1px solid var(--border-strong);
       border-radius: var(--radius);
-      background: var(--surface);
-      box-shadow: 0 3px 12px rgba(0, 0, 0, 0.28);
+      background: var(--card);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
       user-select: none;
       touch-action: none;
+      transition: border-color 120ms ease, opacity 120ms ease;
     }
-    .node[data-access="write"] {
-      --node-color: var(--ok);
-      border-color: color-mix(in srgb, var(--ok) 70%, transparent);
-      box-shadow: 0 0 0 1px color-mix(in srgb, var(--ok) 25%, transparent), 0 0 16px color-mix(in srgb, var(--ok) 24%, transparent);
-    }
-    .node[data-access="granted"] { --node-color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
-    .node[data-access="missing"] { --node-color: var(--danger); border-style: dashed; border-color: color-mix(in srgb, var(--danger) 60%, transparent); }
+    .node:hover { border-color: color-mix(in srgb, var(--text) 30%, transparent); }
+    .node[data-access="missing"] { border-style: dashed; border-color: color-mix(in srgb, var(--danger) 60%, transparent); }
+    .node.dimmed { opacity: 0.35; }
     /* Agent activity, from the audit log. Working and blocked glow; recent keeps a soft border. */
     .node[data-activity="working"] { --glow: var(--active); border-color: var(--active); animation: node-glow 1.6s ease-in-out infinite; }
     .node[data-activity="blocked"] { --glow: var(--danger); border-color: var(--danger); animation: node-glow 1.6s ease-in-out infinite; }
@@ -342,7 +473,11 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       0%, 100% { box-shadow: 0 0 0 1px color-mix(in srgb, var(--glow) 35%, transparent), 0 0 10px color-mix(in srgb, var(--glow) 25%, transparent); }
       50% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--glow) 60%, transparent), 0 0 26px color-mix(in srgb, var(--glow) 55%, transparent); }
     }
-    .activity { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 0.78em; }
+    .node[aria-selected="true"] {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent), 0 0 0 5px color-mix(in srgb, var(--accent) 22%, transparent), 0 10px 26px rgba(0, 0, 0, 0.4);
+    }
+    .activity { display: flex; align-items: center; gap: 6px; min-width: 0; margin-top: -4px; padding: 0 12px 8px; color: var(--muted); font-size: 0.78em; }
     .activity[hidden] { display: none; }
     .activity::before { content: ''; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: currentColor; }
     .node[data-activity="working"][data-action="editing"] { --glow: var(--edit); border-color: var(--edit); }
@@ -354,20 +489,20 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       .node[data-activity], .activity::before, #edges path.flow { animation: none !important; }
       .node[data-activity="working"], .node[data-activity="blocked"] { box-shadow: 0 0 0 2px color-mix(in srgb, var(--glow) 60%, transparent), 0 0 18px color-mix(in srgb, var(--glow) 45%, transparent); }
     }
-    .node[aria-selected="true"] { outline: 2px solid var(--focus); outline-offset: 2px; }
     .node.dragging { cursor: grabbing; opacity: 0.92; z-index: 10; }
     .node.drop-target { outline: 2px dashed var(--accent-text); outline-offset: 3px; }
-    .node-head { display: flex; align-items: center; gap: 10px; min-width: 0; cursor: grab; }
+    .node-head { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 12px 12px 10px; cursor: grab; }
     .tile {
       display: grid;
       place-items: center;
       width: 34px;
       height: 34px;
       flex: 0 0 34px;
+      border: 1px solid color-mix(in srgb, var(--tint) 28%, transparent);
       border-radius: 8px;
-      color: var(--node-color);
-      background: color-mix(in srgb, var(--node-color) 16%, var(--field));
-      font-size: 0.78em;
+      color: var(--tint);
+      background: color-mix(in srgb, var(--tint) 16%, var(--card));
+      font-size: 0.76em;
       font-weight: 800;
     }
     /* The activity icon replaces the initials. Its shapes are one color, painted with the card's glow. */
@@ -380,133 +515,200 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
     .tile[data-pose] svg, .robot svg { display: block; }
     .tile[data-pose] path, .robot path { fill: currentColor; }
     .tile[data-pose] path[stroke-width], .robot path[stroke-width] { stroke: currentColor; }
-    /* The robot acts out the same activity beside the name, and naps while the repository is idle. */
-    .robot { width: 38px; height: 38px; flex: 0 0 38px; margin: -2px 0; color: var(--glow, var(--active)); }
-    .robot[data-pose="idle"] { color: var(--muted); opacity: 0.6; }
+    /* The robot acts out the same activity beside the name while an agent works here. */
+    .robot { width: 34px; height: 34px; flex: 0 0 34px; margin: -2px 0; color: var(--glow, var(--active)); }
     .node[data-activity="recent"] .robot { color: var(--ok); }
     .node-copy { display: grid; min-width: 0; flex: 1; }
-    .node-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .node-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--mono); font-size: 0.8em; }
-    .dot { width: 9px; height: 9px; flex: 0 0 9px; align-self: flex-start; margin-top: 3px; border-radius: 50%; background: var(--node-color); box-shadow: 0 0 6px var(--node-color); }
-    .node[data-access="read"] .dot { background: transparent; border: 1.5px solid var(--muted); box-shadow: none; }
-    .chip {
-      justify-self: start;
-      padding: 1px 8px;
-      border: 1px solid color-mix(in srgb, var(--node-color) 55%, transparent);
-      border-radius: 999px;
-      color: var(--node-color);
-      font-size: 0.78em;
-      line-height: 1.6;
-    }
-    .node-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-    button.msg-switch {
+    .node-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+    .node-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-family: var(--mono); font-size: 0.78em; }
+    /* The dot: green for the write target, blue when an agent may work here, hollow when it may not. */
+    .dot { width: 8px; height: 8px; flex: 0 0 8px; align-self: flex-start; margin-top: 4px; border: 1.5px solid var(--muted); border-radius: 50%; }
+    .node[data-agent="on"] .dot { border-color: var(--accent-text); background: var(--accent-text); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .node[data-access="write"] .dot { border-color: var(--ok); background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+    .node[data-access="granted"] .dot { border-color: var(--warn); background: var(--warn); }
+    .node[data-access="missing"] .dot { border-color: var(--danger); background: var(--danger); }
+    .node-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); }
+    .pill {
       display: inline-flex;
       align-items: center;
-      gap: 6px;
-      padding: 1px 2px;
-      border: 0;
-      color: var(--muted);
-      background: transparent;
-      font-size: 0.74em;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-    }
-    button.msg-switch:hover:not(:disabled) { background: transparent; color: var(--text); }
-    .msg-switch .track {
-      position: relative;
-      width: 26px;
-      height: 14px;
+      gap: 5px;
+      padding: 2px 8px;
       border: 1px solid var(--border-strong);
-      border-radius: 999px;
-      background: var(--field);
-      transition: background 120ms ease, border-color 120ms ease;
+      border-radius: 6px;
+      color: var(--muted);
+      background: color-mix(in srgb, var(--text) 5%, transparent);
+      font-size: 0.76em;
+      font-weight: 600;
     }
-    .msg-switch .track::after {
+    .node[data-access="write"] .pill { border-color: color-mix(in srgb, var(--ok) 35%, transparent); color: var(--ok); background: var(--ok-soft); }
+    .node[data-access="granted"] .pill { border-color: color-mix(in srgb, var(--warn) 40%, transparent); color: var(--warn); }
+    .node[data-access="missing"] .pill { border-color: color-mix(in srgb, var(--danger) 40%, transparent); color: var(--danger); }
+    .agent-note { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 0.76em; }
+    button.switch { gap: 8px; min-height: 0; padding: 0; border: 0; color: var(--muted); background: transparent; font-size: 0.76em; font-weight: 500; }
+    button.switch:hover:not(:disabled) { color: var(--text); background: transparent; }
+    .switch .track {
+      position: relative;
+      width: 30px;
+      height: 17px;
+      flex: 0 0 30px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--text) 20%, transparent);
+      transition: background 120ms ease;
+    }
+    .switch .track::after {
       content: '';
       position: absolute;
       top: 2px;
       left: 2px;
-      width: 8px;
-      height: 8px;
+      width: 13px;
+      height: 13px;
       border-radius: 50%;
-      background: var(--muted);
-      transition: transform 120ms ease, background 120ms ease;
+      background: #ffffff;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+      transition: transform 120ms ease;
     }
-    .msg-switch[aria-checked="true"] { color: var(--ok); }
-    .msg-switch[aria-checked="true"] .track { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 25%, var(--field)); }
-    .msg-switch[aria-checked="true"] .track::after { transform: translateX(12px); background: var(--ok); }
-    .node[data-access="write"] .chip { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent-text) 50%, transparent); background: color-mix(in srgb, var(--accent-text) 12%, transparent); }
-    /* The port: drag it onto another node to record that this one depends on that one. */
+    .switch[aria-checked="true"] .track { background: var(--accent); }
+    .switch[aria-checked="true"] .track::after { transform: translateX(13px); }
+    .switch.lg .track { width: 38px; height: 22px; flex-basis: 38px; }
+    .switch.lg .track::after { width: 18px; height: 18px; }
+    .switch.lg[aria-checked="true"] .track::after { transform: translateX(16px); }
+    button.switch:disabled { opacity: 0.6; cursor: default; }
+    /* Ports: drag the right one onto another node to record that this one depends on that one. The left one is where lines arrive. */
     .port {
       position: absolute;
-      right: -8px;
       top: 50%;
-      width: 16px;
-      height: 16px;
-      margin-top: -8px;
-      border: 2px solid var(--accent-text);
+      z-index: 4;
+      width: 11px;
+      height: 11px;
+      margin-top: -5.5px;
+      border: 1.5px solid color-mix(in srgb, var(--text) 45%, transparent);
       border-radius: 50%;
       background: var(--bg);
-      cursor: crosshair;
+      transition: transform 120ms ease, background 120ms ease;
     }
-    .port:hover { background: var(--accent-text); }
+    .port.in { left: -6px; pointer-events: none; }
+    .port.out { right: -6px; cursor: crosshair; }
+    .node:hover .port, .node[aria-selected="true"] .port { border-color: var(--accent-text); }
+    .port.out:hover { background: var(--accent-text); transform: scale(1.3); }
 
     .empty-board { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; color: var(--muted); }
 
     /* Inspector */
     #inspector {
-      display: grid;
-      align-content: start;
-      gap: 12px;
-      width: 320px;
+      display: flex;
+      flex-direction: column;
+      width: 340px;
+      min-height: 0;
       max-height: 100%;
       overflow: auto;
-      padding: 14px;
       border-left: 1px solid var(--border);
       background: var(--surface);
     }
     /* Collapsed, the canvas takes the inspector's column. */
     .workspace.details-collapsed #inspector { display: none; }
-    #details-toggle[aria-pressed="true"] { background: var(--hover); }
-    #inspector h2 { margin: 0; font-size: 0.98rem; }
-    #inspector h3 { margin: 4px 0 0; font-size: 0.88em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-    .inspector-head { display: flex; align-items: center; gap: 8px; }
-    .inspector-head h2 { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    #inspector-empty, #inspector-body { display: flex; flex-direction: column; flex: 1; }
+    .insp-head { display: flex; align-items: center; gap: 12px; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+    .insp-head .tile { width: 40px; height: 40px; flex-basis: 40px; border-radius: 10px; font-size: 0.85em; }
+    .insp-title { flex: 1; min-width: 0; }
+    .insp-title h2 { margin: 0; font-size: 1.05rem; font-weight: 700; overflow-wrap: anywhere; }
+    .insp-status { display: flex; align-items: center; gap: 6px; margin: 2px 0 0; color: var(--muted); font-size: 0.85em; }
+    .insp-status::before { content: ''; width: 7px; height: 7px; flex: 0 0 7px; border-radius: 50%; background: var(--status, var(--muted)); }
+    .section { display: grid; gap: 12px; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+    .section h3 { display: flex; justify-content: space-between; margin: 0; color: var(--muted); font-size: 0.74em; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+    .section h3 .count-num { font-weight: 500; letter-spacing: 0; }
+    .segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg); }
+    .segmented button { min-height: 34px; border: 0; color: var(--muted); background: transparent; }
+    .segmented button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+    .segmented button[aria-checked="true"] { color: var(--text); background: color-mix(in srgb, var(--text) 9%, transparent); cursor: default; }
+    .segmented button.write[aria-checked="true"] { color: var(--ok); background: var(--ok-soft); }
+    .segmented button:disabled { opacity: 1; }
+    .segmented button:disabled:not([aria-checked="true"]) { opacity: 0.5; }
+    .grant-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 0.86em; }
+    .grant-row select { width: auto; min-height: 26px; padding: 2px 6px; }
+    .setting-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 12px; padding: 14px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--card); }
+    .badge-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; color: var(--accent-text); background: var(--accent-soft); }
+    .setting-card strong { display: block; font-size: 0.92em; }
+    .setting-card p { margin: 2px 0 0; color: var(--muted); font-size: 0.84em; }
+    .path-field { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 4px 0 12px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg); }
+    .path-field code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 0.85em; }
+    .path-field button { min-height: 28px; padding: 0 8px; border: 0; color: var(--muted); background: transparent; font-weight: 500; }
+    .path-field button:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+    .repo-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+    button.repo-row {
+      justify-content: flex-start;
+      gap: 12px;
+      width: 100%;
+      min-height: 52px;
+      padding: 9px 12px;
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      color: var(--text);
+      background: var(--card);
+      font-weight: 500;
+      text-align: left;
+      white-space: normal;
+    }
+    button.repo-row:hover:not(:disabled) { background: var(--hover); }
+    .repo-row .tile { width: 30px; height: 30px; flex-basis: 30px; font-size: 0.7em; }
+    .repo-row .copy { display: grid; flex: 1; min-width: 0; }
+    .repo-row .copy strong, .repo-row .copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .repo-row .copy span { color: var(--muted); font-size: 0.82em; font-weight: 400; }
+    .repo-row > .icon { color: var(--muted); }
+    .insp-foot { margin-top: auto; padding: 16px 20px; border-top: 1px solid var(--border); }
     .pair-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
     .pair-list li {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 4px 8px;
       align-items: center;
-      padding: 7px 9px;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      background: var(--field);
+      padding: 8px 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: 8px;
+      background: var(--card);
       font-size: 0.86em;
     }
     .pair-list code { grid-column: 1; overflow-wrap: anywhere; font-family: var(--mono); font-size: 0.95em; }
     .pair-list .meta { grid-column: 1; color: var(--muted); }
     .pair-list button { grid-column: 2; grid-row: 1 / span 3; }
     .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-    .hours-select { width: auto; min-height: 24px; padding: 2px 6px; font-size: 0.88em; }
-    .form { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+    .form { display: grid; gap: 8px; margin: 16px 20px; padding: 14px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--card); }
+    .form h2 { margin: 0; font-size: 1rem; }
     .end-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 6px; }
     .error { color: var(--danger); }
+
+    @media (max-width: 900px) {
+      .canvas-hint { display: none; }
+    }
+    /* Narrow: icon-only buttons, search on its own row, and the inspector over the canvas. */
+    @media (max-width: 760px) {
+      .toolbar { padding: 8px 12px; }
+      .count, .search kbd, .btn-label { display: none; }
+      .search { order: 10; width: 100%; }
+      #auto-layout, #details-toggle, #add-repo { width: 32px; padding: 0; }
+      .workspace { grid-template-columns: minmax(0, 1fr); }
+      #inspector { position: absolute; top: 0; right: 0; bottom: 0; z-index: 30; width: min(340px, 100%); box-shadow: var(--shadow); }
+      .minimap { display: none; }
+    }
+    @media (max-width: 480px) {
+      .legend { display: none; }
+    }
   </style>
 </head>
 <body>
   <header class="toolbar">
-    <h1>Repository Map</h1>
-    <div class="add-menu">
-      <button id="add-button" class="add-button" type="button" title="Add" aria-haspopup="true" aria-expanded="false">+</button>
-      <div id="add-menu" class="menu" role="menu" hidden>
-        <button id="add-repo" class="ghost compact" type="button" role="menuitem">Add Repository…</button>
-        <button id="add-link" class="ghost compact" type="button" role="menuitem">Add File Link…</button>
-      </div>
+    <div class="brand">
+      <span class="brand-icon" data-icon="share" data-icon-size="17"></span>
+      <h1>Repository Map</h1>
+      <span id="repo-count" class="count"></span>
     </div>
-    <button id="auto-layout" class="ghost compact" type="button" title="Arrange nodes automatically">Auto Layout</button>
+    <span class="spacer"></span>
+    <label class="search" data-icon="search">
+      <input id="search" type="search" placeholder="Search repositories" aria-label="Search repositories" autocomplete="off" spellcheck="false">
+      <kbd id="search-key">Ctrl K</kbd>
+    </label>
+    <button id="auto-layout" class="ghost" type="button" title="Arrange nodes automatically" aria-label="Auto layout" data-icon="grid"><span class="btn-label">Auto layout</span></button>
     <div class="lines-menu">
-      <button id="lines-button" class="ghost compact" type="button" aria-haspopup="true" aria-expanded="false" title="Connector shape and line styles">Lines ▾</button>
+      <button id="lines-button" class="ghost icon-only" type="button" aria-haspopup="true" aria-expanded="false" title="Connector shape and line styles" aria-label="Line styles" data-icon="spline"></button>
       <div id="lines-panel" class="menu" hidden>
         <div class="menu-row">
           <label for="line-shape">Shape</label>
@@ -531,28 +733,42 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         <label class="menu-check"><input id="snap-grid" type="checkbox"> Snap nodes to the grid</label>
       </div>
     </div>
-    <button id="refresh" class="ghost compact" type="button">Refresh</button>
-    <button id="details-toggle" class="ghost compact" type="button" aria-controls="inspector" aria-pressed="true" title="Hide details (D)">Details</button>
-    <div class="legend" aria-label="Legend">
-      <span><i class="dep"></i>depends on</span>
-      <span><i class="link"></i>file links</span>
-      <span><i class="detected"></i>detected imports</span>
-      <span><i class="live"></i>agent reading</span>
-      <span><i class="live editing"></i>agent editing</span>
+    <button id="refresh" class="ghost icon-only" type="button" title="Refresh" aria-label="Refresh" data-icon="refresh"></button>
+    <button id="details-toggle" class="ghost" type="button" aria-controls="inspector" aria-pressed="true" aria-label="Details" title="Hide details (D)" data-icon="panel"><span class="btn-label">Details</span></button>
+    <div class="add-menu split">
+      <button id="add-repo" type="button" title="Add a repository folder" aria-label="Add repository" data-icon="plus"><span class="btn-label">Add repository</span></button>
+      <button id="add-button" class="caret" type="button" title="More to add" aria-label="More to add" aria-haspopup="true" aria-expanded="false" data-icon="chevronDown" data-icon-size="14"></button>
+      <div id="add-menu" class="menu" role="menu" hidden>
+        <button id="add-link" class="ghost compact" type="button" role="menuitem" data-icon="link">Add file link…</button>
+      </div>
     </div>
-    <span class="spacer"></span>
-    <p id="status" class="hint" role="status" aria-live="polite"></p>
   </header>
 
   <div class="workspace">
     <div id="viewport" tabindex="-1" aria-label="Repository canvas">
-      <div class="canvas-controls" aria-label="View controls">
-        <button id="zoom-out" class="ghost compact" type="button" title="Zoom out (−)" aria-label="Zoom out">−</button>
-        <button id="zoom-reset" class="ghost compact" type="button" title="Reset to 100% (0)">100%</button>
-        <button id="zoom-in" class="ghost compact" type="button" title="Zoom in (+)" aria-label="Zoom in">+</button>
-        <button id="zoom-fit" class="ghost compact" type="button" title="Fit every repository in view (F)">Fit</button>
+      <p id="status" class="panel toast" role="status" aria-live="polite"></p>
+      <div class="panel legend" role="group" aria-label="Connections">
+        <div class="legend-head"><span class="eyebrow">Connections</span><span class="hint">Click to filter</span></div>
+        <button class="legend-row" type="button" data-filter="dep"><i class="swatch dep"></i><span class="label">Depends on</span></button>
+        <button class="legend-row" type="button" data-filter="link"><i class="swatch link"></i><span class="label">File links</span></button>
+        <button class="legend-row" type="button" data-filter="detected"><i class="swatch detected"></i><span class="label">Detected imports</span></button>
+        <button class="legend-row" type="button" data-filter="reading"><i class="swatch reading"></i><span class="label">Agent reading</span></button>
+        <button class="legend-row" type="button" data-filter="editing"><i class="swatch editing"></i><span class="label">Agent editing</span></button>
       </div>
-      <p class="canvas-hint hint">Ctrl + wheel to zoom · drag empty space or hold Space to pan</p>
+      <p class="panel canvas-hint"><kbd>Ctrl</kbd> + scroll to zoom · <kbd>Space</kbd> + drag to pan</p>
+      <div class="view-dock">
+        <div id="minimap" class="panel minimap" title="Click or drag to move the view" aria-hidden="true" hidden>
+          <div id="mini-nodes"></div>
+          <div id="mini-view"></div>
+        </div>
+        <div class="panel zoom" role="group" aria-label="View controls">
+          <button id="zoom-out" type="button" title="Zoom out (−)" aria-label="Zoom out" data-icon="minus"></button>
+          <button id="zoom-reset" type="button" title="Reset to 100% (0)">100%</button>
+          <button id="zoom-in" type="button" title="Zoom in (+)" aria-label="Zoom in" data-icon="plus"></button>
+          <span class="sep"></span>
+          <button id="zoom-fit" type="button" title="Fit every repository in view (F)" aria-label="Fit to view" data-icon="fit"></button>
+        </div>
+      </div>
       <div id="board">
         <svg id="edges" aria-hidden="true">
           <defs>
@@ -576,7 +792,7 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         <div id="empty-board" class="empty-board" hidden>
           <div>
             <p>No repositories yet.</p>
-            <p class="hint">Use + to add one.</p>
+            <p class="hint">Use Add repository to put one on the map.</p>
           </div>
         </div>
       </div>
@@ -584,11 +800,16 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
 
     <aside id="inspector" aria-label="Details">
       <div id="inspector-empty">
-        <div class="inspector-head">
-          <h2>Map your workspace</h2>
-          <button id="details-collapse" class="ghost compact" type="button" title="Hide details (D)" aria-label="Hide details">»</button>
+        <div class="insp-head">
+          <div class="insp-title">
+            <h2>Map your workspace</h2>
+          </div>
+          <button id="details-collapse" class="plain icon-only" type="button" title="Hide details (D)" aria-label="Hide details" data-icon="close"></button>
         </div>
-        <p class="hint">Drag a node to arrange it. Drag a node's ● port onto another node to record a dependency. Click a connection to see its file links.</p>
+        <div class="section">
+          <p class="hint">Drag a card to arrange it. Drag the port on a card's right edge onto another card to record a dependency. Click a connection to see its file links.</p>
+          <button id="empty-add-link" class="ghost" type="button" data-icon="link">Add file link</button>
+        </div>
       </div>
       <div id="inspector-body" hidden></div>
       <form id="link-form" class="form" hidden novalidate>
@@ -634,7 +855,58 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       const ROBOTS = ${JSON.stringify(buildRobots())};
       const SVG = 'http' + '://www.w3.org/2000/svg';
       const NODE_WIDTH = 250;
-      const NODE_HEIGHT = 92;
+      const NODE_HEIGHT = 100;
+      // Stroke icons on a 24-unit square, drawn in the text color.
+      const ICONS = {
+        share: 'M18 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8.6 13.5l6.8 4M15.4 6.5l-6.8 4',
+        search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM21 21l-4.3-4.3',
+        grid: 'M4 4h6v6H4zM14 4h6v6h-6zM14 14h6v6h-6zM4 14h6v6H4z',
+        spline: 'M3 17c4 0 4-10 9-10s5 10 9 10',
+        refresh: 'M21 12a9 9 0 1 1-2.6-6.4L21 8M21 3v5h-5',
+        panel: 'M4 4h16v16H4zM15 4v16',
+        plus: 'M12 5v14M5 12h14',
+        minus: 'M5 12h14',
+        fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5',
+        chevronDown: 'M6 9l6 6 6-6',
+        chevron: 'M9 6l6 6-6 6',
+        check: 'M5 12l5 5L20 7',
+        close: 'M6 6l12 12M18 6L6 18',
+        link: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1',
+        lock: 'M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4',
+        pencil: 'M16 4l4 4L8 20H4v-4zM13 7l4 4',
+        clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 7v5l3 2',
+        alert: 'M12 9v4M12 17h.01M10.3 3.9L2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z',
+        bot: 'M5 8h14v11H5zM12 4v4M9 13h.01M15 13h.01M2 12v4M22 12v4',
+        copy: 'M9 9h11v11H9zM5 15H4V4h11v1',
+        folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z',
+        trash: 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6'
+      };
+      const icon = (name, size) => {
+        const svg = document.createElementNS(SVG, 'svg');
+        svg.setAttribute('class', 'icon');
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.setAttribute('width', String(size || 16));
+        svg.setAttribute('height', String(size || 16));
+        svg.setAttribute('aria-hidden', 'true');
+        const path = document.createElementNS(SVG, 'path');
+        path.setAttribute('d', ICONS[name]);
+        svg.append(path);
+        return svg;
+      };
+      document.querySelectorAll('[data-icon]').forEach((host) => host.prepend(icon(host.dataset.icon, Number(host.dataset.iconSize) || 16)));
+      if (/Mac/.test(navigator.platform)) document.getElementById('search-key').textContent = '⌘ K';
+      // Each repository keeps one avatar color, picked from its name. The write target is green, a missing one red.
+      const TINTS = ['#6f8bff', '#a879ff', '#f0a33a', '#2fb8a6', '#ec6f9e', '#3ba8ff'];
+      const tintOf = (repo) => {
+        if (!repo) return 'var(--muted)';
+        if (repo.missing) return 'var(--danger)';
+        if (repo.access === 'write') return 'var(--ok)';
+        let hash = 0;
+        for (const char of repo.name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+        return TINTS[hash % TINTS.length];
+      };
+      const ACCESS_LABELS = { write: 'Write target', granted: 'Edits allowed', read: 'Read-only', missing: 'Missing' };
+      const ACCESS_ICONS = { write: 'pencil', granted: 'clock', read: 'lock', missing: 'alert' };
       const viewport = document.getElementById('viewport');
       const board = document.getElementById('board');
       const edgePaths = document.getElementById('edge-paths');
@@ -656,6 +928,11 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       const linkError = document.getElementById('link-error');
       const workspace = document.querySelector('.workspace');
       const detailsToggle = document.getElementById('details-toggle');
+      const repoCount = document.getElementById('repo-count');
+      const searchInput = document.getElementById('search');
+      const minimap = document.getElementById('minimap');
+      const miniNodes = document.getElementById('mini-nodes');
+      const miniView = document.getElementById('mini-view');
 
       let graph = null;
       let positions = {};
@@ -685,8 +962,56 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         pan = { x: Number(restored.view.x) || 0, y: Number(restored.view.y) || 0 };
       }
       let detailsOpen = !(restored && restored.detailsOpen === false);
-      const saveState = () => vscode.setState({ view: { zoom, x: pan.x, y: pan.y }, detailsOpen });
+      // Legend rows filter the canvas by connection kind; the choice is kept with the view.
+      const shown = Object.assign({ dep: true, link: true, detected: true, reading: true, editing: true }, restored && restored.shown);
+      const saveState = () => vscode.setState({ view: { zoom, x: pan.x, y: pan.y }, detailsOpen, shown });
       const zoomLabel = document.getElementById('zoom-reset');
+
+      // The minimap frames every repository and the visible area. While it is dragged, its frame holds still.
+      let miniFrame = null;
+      let miniHeld = null;
+      const drawMinimap = () => {
+        minimap.hidden = !graph || graph.repos.length === 0;
+        if (minimap.hidden) return;
+        const view = { x: -pan.x / zoom, y: -pan.y / zoom, width: viewport.clientWidth / zoom, height: viewport.clientHeight / zoom };
+        let frame = miniHeld;
+        if (!frame) {
+          let left = view.x;
+          let top = view.y;
+          let right = view.x + view.width;
+          let bottom = view.y + view.height;
+          Object.values(positions).forEach((position) => {
+            left = Math.min(left, position.x);
+            top = Math.min(top, position.y);
+            right = Math.max(right, position.x + NODE_WIDTH);
+            bottom = Math.max(bottom, position.y + NODE_HEIGHT);
+          });
+          if (!minimap.clientWidth || !(right > left) || !(bottom > top)) return;
+          const scale = Math.min(minimap.clientWidth / (right - left), minimap.clientHeight / (bottom - top));
+          frame = {
+            left,
+            top,
+            scale,
+            x: (minimap.clientWidth - (right - left) * scale) / 2,
+            y: (minimap.clientHeight - (bottom - top) * scale) / 2
+          };
+        }
+        miniFrame = frame;
+        const place = (target, x, y, width, height) => {
+          target.style.left = frame.x + (x - frame.left) * frame.scale + 'px';
+          target.style.top = frame.y + (y - frame.top) * frame.scale + 'px';
+          target.style.width = width * frame.scale + 'px';
+          target.style.height = height * frame.scale + 'px';
+        };
+        miniNodes.replaceChildren(...graph.repos.filter((repo) => positions[repo.name]).map((repo) => {
+          const box = element('span', 'mini-node');
+          box.classList.toggle('write', repo.access === 'write');
+          box.classList.toggle('selected', Boolean(selection && selection.type === 'node' && selection.name === repo.name));
+          place(box, positions[repo.name].x, positions[repo.name].y, NODE_WIDTH, NODE_HEIGHT);
+          return box;
+        }));
+        place(miniView, view.x, view.y, view.width, view.height);
+      };
 
       const applyView = () => {
         board.style.transform = 'translate(' + pan.x + 'px, ' + pan.y + 'px) scale(' + zoom + ')';
@@ -694,7 +1019,14 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         viewport.style.backgroundSize = (GRID * zoom) + 'px ' + (GRID * zoom) + 'px';
         viewport.style.backgroundPosition = pan.x + 'px ' + pan.y + 'px';
         zoomLabel.textContent = Math.round(zoom * 100) + '%';
+        drawMinimap();
         saveState();
+      };
+
+      const centerOn = (name) => {
+        const box = center(name);
+        pan = { x: viewport.clientWidth / 2 - box.x * zoom, y: viewport.clientHeight / 2 - box.y * zoom };
+        applyView();
       };
 
       // Details: the inspector collapses to give the canvas its width. Selecting something opens it again.
@@ -768,7 +1100,19 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         pending.set(requestId, onResult || (() => {}));
         vscode.postMessage(Object.assign({ type: 'repos', requestId, action }, params || {}));
       };
-      const setStatus = (text) => { statusLine.textContent = text || ''; };
+      // Messages show as a toast over the canvas and clear on their own. Sticky ones stay until the next message.
+      let statusTimer;
+      const setStatus = (text, sticky) => {
+        clearTimeout(statusTimer);
+        statusLine.textContent = text || '';
+        if (text && !sticky) statusTimer = setTimeout(() => { statusLine.textContent = ''; }, 5000);
+      };
+      // Commands the map panel runs itself, outside the catalog.
+      const command = (name, repoName) => {
+        requestId += 1;
+        pending.set(requestId, (message) => setStatus(message.message));
+        vscode.postMessage({ type: 'map', requestId, command: name, name: repoName });
+      };
       const element = (tag, className, text) => {
         const node = document.createElement(tag);
         if (className) node.className = className;
@@ -784,13 +1128,14 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       const pairKey = (a, b) => (a < b ? a + '|' + b : b + '|' + a);
 
       const loadGraph = () => {
-        setStatus('Reading the workspace…');
+        setStatus('Reading the workspace…', true);
         request('graph', {}, (message) => {
           if (!message.graph) {
-            setStatus(message.message || 'Could not read tokio.repos.json.');
+            setStatus(message.message || 'Could not read tokio.repos.json.', true);
             return;
           }
           graph = message.graph;
+          repoCount.textContent = graph.repos.length + (graph.repos.length === 1 ? ' repository' : ' repositories');
           positions = Object.assign(autoLayout(graph, {}), graph.layout || {});
           settings = graph.settings || settings;
           applySettings();
@@ -865,10 +1210,11 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       };
 
       // The side of a node a connector leaves from, facing the other node, with the direction it leaves in.
+      // Lines use the side ports unless the other node sits mostly above or below this one.
       const sideAnchor = (box, toward) => {
         const dx = toward.x - box.x;
         const dy = toward.y - box.y;
-        if (Math.abs(dx) * box.height >= Math.abs(dy) * box.width) {
+        if (Math.abs(dx) >= box.width * 0.75) {
           const sign = dx >= 0 ? 1 : -1;
           return { x: box.x + sign * (box.width / 2 + 6), y: box.y, dx: sign, dy: 0 };
         }
@@ -911,14 +1257,24 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         const missing = new Set(graph.repos.filter((repo) => repo.missing).map((repo) => repo.name));
         const live = (name) => activity[name] && activity[name].state !== 'recent';
         connections().forEach((connection) => {
+          const showDep = Boolean(connection.dependency) && shown.dep;
+          const showLinks = connection.links.length > 0 && shown.link;
+          const showDetected = connection.detected.length > 0 && shown.detected;
+          // A filtered-out kind drops out of the line and its label; a line with nothing left is not drawn.
+          if (!showDep && !showLinks && !showDetected) return;
           const fromName = connection.dependency ? connection.dependency.from : connection.a;
           const toName = connection.dependency ? connection.dependency.to : connection.b;
           const route = routeEdge(center(fromName), center(toName));
-          const kind = connection.links.length > 0 ? 'link' : connection.dependency ? 'dep' : 'detected';
+          const kind = showLinks ? 'link' : showDep ? 'dep' : 'detected';
           const style = settings.styles[kind === 'dep' ? 'dependency' : kind];
           const broken = missing.has(fromName) || missing.has(toName);
           // Work in the write target alone only lights its card; a line flows when the agent reaches the other end.
-          const flowing = !broken && [fromName, toName].some((name) => name !== graph.defaultRepo && live(name));
+          // Color by what the agent does at the far end; an edit in the write target says nothing about this line.
+          const ends = broken ? [] : [fromName, toName].filter((name) => name !== graph.defaultRepo && live(name)).map((name) => activity[name]);
+          const blocked = ends.some((entry) => entry.state === 'blocked');
+          const editing = ends.some((entry) => entry.state === 'working' && entry.action === 'editing');
+          // The legend filters agent lines by what the agent does there. A blocked line always shows.
+          const flowing = ends.length > 0 && (blocked || (editing ? shown.editing : shown.reading));
           const classes = [kind];
           if (selection && selection.type === 'edge' && selection.key === connection.key) classes.push('selected');
           if (broken) classes.push('missing');
@@ -931,7 +1287,7 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           if (dashes) {
             path.setAttribute('stroke-dasharray', dashes);
           }
-          if (connection.dependency) {
+          if (showDep) {
             path.setAttribute('marker-end', 'url(#arrow)');
           }
           edgePaths.appendChild(path);
@@ -939,13 +1295,9 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
             // Dots run along the line, from the depending repository toward the one it depends on.
             const flow = document.createElementNS(SVG, 'path');
             flow.setAttribute('d', route.d);
-            // Color by what the agent does at the far end; an edit in the write target says nothing about this line.
-            const ends = [fromName, toName].filter((name) => name !== graph.defaultRepo && live(name)).map((name) => activity[name]);
-            const blocked = ends.some((entry) => entry.state === 'blocked');
-            const editing = ends.some((entry) => entry.state === 'working' && entry.action === 'editing');
             flow.setAttribute('class', 'flow' + (blocked ? ' blocked' : editing ? ' editing' : ''));
             if (editing && !blocked) path.classList.add('editing');
-            if (connection.dependency) {
+            if (showDep) {
               path.setAttribute('marker-end', 'url(#arrow-' + (blocked ? 'blocked' : editing ? 'editing' : 'live') + ')');
             }
             edgePaths.appendChild(flow);
@@ -954,9 +1306,9 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           const end = route.mid;
 
           const parts = [];
-          if (connection.dependency) parts.push('depends on');
-          if (connection.links.length > 0) parts.push(connection.links.length + (connection.links.length === 1 ? ' link' : ' links'));
-          if (connection.detected.length > 0) parts.push(connection.detected.length + ' detected');
+          if (showDep) parts.push('depends on');
+          if (showLinks) parts.push(connection.links.length + (connection.links.length === 1 ? ' link' : ' links'));
+          if (showDetected) parts.push(connection.detected.length + ' detected');
           const label = element('button', 'edge-label', parts.join(' · '));
           label.type = 'button';
           label.dataset.kind = kind;
@@ -990,6 +1342,8 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           const node = element('div', 'node');
           node.dataset.name = repo.name;
           node.dataset.access = state;
+          node.dataset.agent = repo.access === 'write' || repo.messaging ? 'on' : 'off';
+          node.style.setProperty('--tint', tintOf(repo));
           node.tabIndex = 0;
           node.setAttribute('role', 'button');
           node.setAttribute('aria-selected', String(Boolean(selection && selection.type === 'node' && selection.name === repo.name)));
@@ -1005,34 +1359,23 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           const robot = element('span', 'robot');
           robot.setAttribute('aria-hidden', 'true');
           head.append(tile, copy, robot, element('span', 'dot'));
-          const chip = element('span', 'chip', state === 'write' ? 'write target' : state === 'granted' ? 'edits allowed' : state === 'missing' ? 'missing' : 'read-only');
-          const port = element('span', 'port');
-          port.title = 'Drag onto another repository: ' + repo.name + ' depends on it';
-          const row = element('div', 'node-row');
-          row.append(chip);
-          // This repository has no switch: the switch on each other card says whether its agent and ours may message.
-          if (typeof repo.messaging === 'boolean' && !repo.missing) {
-            const toggle = element('button', 'msg-switch');
-            toggle.type = 'button';
-            toggle.setAttribute('role', 'switch');
-            toggle.setAttribute('aria-checked', String(repo.messaging));
-            toggle.setAttribute('aria-label', 'Messaging with ' + repo.name);
-            toggle.title = repo.messaging
-              ? 'Agents here and in ' + repo.name + ' may message each other. Click to turn off.'
-              : 'Click to let agents here and in ' + repo.name + ' message each other.';
-            toggle.append(element('span', 'track'), element('span', '', repo.messaging ? 'ON' : 'OFF'));
-            toggle.addEventListener('pointerdown', (event) => event.stopPropagation());
-            toggle.addEventListener('click', (event) => {
-              event.stopPropagation();
-              mutate(repo.messaging ? 'disconnect' : 'connect', { name: repo.name });
-            });
-            row.append(toggle);
+          const foot = element('div', 'node-foot');
+          foot.append(accessPill(state));
+          if (state === 'write') {
+            const note = element('span', 'agent-note');
+            note.append(icon('bot', 13), element('span', '', 'Agent can edit'));
+            foot.append(note);
+          } else if (typeof repo.messaging === 'boolean' && !repo.missing) {
+            foot.append(agentSwitch(repo, true));
           }
-          node.append(head, row, element('span', 'activity'), port);
+          const portIn = element('span', 'port in');
+          const portOut = element('span', 'port out');
+          portOut.title = 'Drag onto another repository: ' + repo.name + ' depends on it';
+          node.append(head, element('span', 'activity'), foot, portIn, portOut);
           setNodeActivity(node, repo, state);
 
           head.addEventListener('pointerdown', (event) => startDrag(event, node, repo.name));
-          port.addEventListener('pointerdown', (event) => startLink(event, repo.name));
+          portOut.addEventListener('pointerdown', (event) => startLink(event, repo.name));
           node.addEventListener('click', (event) => {
             if (!node.dataset.moved) select({ type: 'node', name: repo.name });
             delete node.dataset.moved;
@@ -1041,6 +1384,32 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           node.addEventListener('keydown', (event) => nudge(event, repo.name));
           nodesLayer.appendChild(node);
         });
+      };
+
+      const accessPill = (state) => {
+        const pill = element('span', 'pill');
+        pill.append(icon(ACCESS_ICONS[state], 12), element('span', '', ACCESS_LABELS[state]));
+        return pill;
+      };
+
+      // The write target has no switch: the switch for each other repository says whether its agent and ours may message.
+      const agentSwitch = (repo, withLabel) => {
+        const toggle = element('button', withLabel ? 'switch' : 'switch lg');
+        toggle.type = 'button';
+        toggle.setAttribute('role', 'switch');
+        toggle.setAttribute('aria-checked', String(repo.messaging));
+        toggle.setAttribute('aria-label', 'Messaging with ' + repo.name);
+        toggle.title = repo.messaging
+          ? 'Agents here and in ' + repo.name + ' may message each other. Click to turn off.'
+          : 'Click to let agents here and in ' + repo.name + ' message each other.';
+        if (withLabel) toggle.append(element('span', '', repo.messaging ? 'Agent on' : 'Agent off'));
+        toggle.append(element('span', 'track'));
+        toggle.addEventListener('pointerdown', (event) => event.stopPropagation());
+        toggle.addEventListener('click', (event) => {
+          event.stopPropagation();
+          mutate(repo.messaging ? 'disconnect' : 'connect', { name: repo.name });
+        });
+        return toggle;
       };
 
       const activityText = (entry) => {
@@ -1101,7 +1470,8 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           tile.textContent = initials(name);
         }
         const robot = node.querySelector('.robot');
-        const robotPose = missing ? '' : pose || 'idle';
+        // The robot shows only while an agent works here, so idle cards stay quiet.
+        const robotPose = missing ? '' : pose;
         robot.hidden = !play('robot:' + name, robot, robotPose, ROBOTS[robotPose]);
       }
 
@@ -1136,13 +1506,45 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           if (node) setNodeActivity(node, repo, repo.missing ? 'missing' : repo.access);
         });
         drawEdges();
+        updateInspectorStatus();
       };
+
+      // Search dims the cards that do not match; Enter selects the first match and brings it into view.
+      let query = '';
+      const matches = (repo) => !query || repo.name.toLowerCase().includes(query) || repo.path.toLowerCase().includes(query);
+      const applySearch = () => {
+        if (!graph) return;
+        graph.repos.forEach((repo) => {
+          const node = nodesLayer.querySelector('[data-name="' + CSS.escape(repo.name) + '"]');
+          if (node) node.classList.toggle('dimmed', !matches(repo));
+        });
+      };
+      searchInput.addEventListener('input', () => {
+        query = searchInput.value.trim().toLowerCase();
+        applySearch();
+      });
+      searchInput.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          const found = query && graph ? graph.repos.find(matches) : null;
+          if (!found) return;
+          select({ type: 'node', name: found.name });
+          centerOn(found.name);
+        } else if (event.key === 'Escape') {
+          searchInput.value = '';
+          query = '';
+          applySearch();
+          searchInput.blur();
+        }
+      });
 
       const render = () => {
         if (!graph) return;
         sizeBoard();
         renderNodes();
+        applySearch();
         drawEdges();
+        drawMinimap();
         renderInspector();
       };
 
@@ -1171,6 +1573,7 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           node.style.left = positions[name].x + 'px';
           node.style.top = positions[name].y + 'px';
           drawEdges();
+          drawMinimap();
         };
         const up = () => {
           node.removeEventListener('pointermove', move);
@@ -1266,6 +1669,101 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         if (message.success || message.view) loadGraph();
       });
 
+      const iconButton = (name, label, className, onClick) => {
+        const button = element('button', className);
+        button.type = 'button';
+        button.append(icon(name, 16));
+        if (label) button.append(element('span', '', label));
+        button.addEventListener('click', onClick);
+        return button;
+      };
+      const section = (title, count) => {
+        const box = element('section', 'section');
+        const heading = element('h3', '', title);
+        if (count !== undefined) heading.append(element('span', 'count-num', String(count)));
+        box.append(heading);
+        return box;
+      };
+      const avatar = (repo, name) => {
+        const tile = element('span', 'tile', initials(name));
+        tile.style.setProperty('--tint', tintOf(repo));
+        return tile;
+      };
+      const describeRepo = (repo) => {
+        if (!repo) return 'Not in the catalog';
+        if (repo.missing) return 'Missing';
+        const agent = repo.access === 'write' ? 'agent can edit' : repo.messaging ? 'agent on' : 'agent off';
+        return ACCESS_LABELS[repo.access] + ' · ' + agent;
+      };
+
+      // The status line under the inspector's title follows the activity poll without a full redraw.
+      const statusOf = (repo) => {
+        const entry = activity[repo.name];
+        if (repo.missing) return { text: 'Folder missing', color: 'var(--danger)' };
+        if (entry) {
+          const color = entry.state === 'blocked' ? 'var(--danger)'
+            : entry.state === 'recent' ? 'var(--muted)'
+              : entry.action === 'editing' ? 'var(--edit)' : 'var(--active)';
+          return { text: activityText(entry).split(' · ')[0], color };
+        }
+        if (repo.access === 'granted') return { text: 'Edits allowed', color: 'var(--warn)' };
+        return { text: 'Idle', color: repo.access === 'write' ? 'var(--ok)' : 'var(--muted)' };
+      };
+      const updateInspectorStatus = () => {
+        const line = inspectorBody.querySelector('.insp-status[data-repo]');
+        const repo = line && graph ? graph.repos.find((candidate) => candidate.name === line.dataset.repo) : null;
+        if (!repo) return;
+        const status = statusOf(repo);
+        line.textContent = status.text;
+        line.style.setProperty('--status', status.color);
+      };
+
+      const segment = (iconName, label, checked, className, onClick) => {
+        const button = iconButton(iconName, label, className, () => { if (!checked) onClick(); });
+        button.setAttribute('role', 'radio');
+        button.setAttribute('aria-checked', String(checked));
+        return button;
+      };
+
+      const agentCard = (repo, state) => {
+        const card = element('div', 'setting-card');
+        const badge = element('span', 'badge-icon');
+        badge.append(icon('bot', 16));
+        const copy = element('div');
+        let text;
+        let toggle = null;
+        if (state === 'write') {
+          text = 'Always on for the write target. The agent can read and edit files here.';
+          toggle = element('button', 'switch lg');
+          toggle.type = 'button';
+          toggle.disabled = true;
+          toggle.setAttribute('role', 'switch');
+          toggle.setAttribute('aria-checked', 'true');
+          toggle.setAttribute('aria-label', 'Agent access');
+          toggle.append(element('span', 'track'));
+        } else if (state === 'missing') {
+          text = 'The folder is missing, so no agent can work here.';
+        } else if (typeof repo.messaging === 'boolean') {
+          text = repo.messaging
+            ? 'On. Agents here and in the write target may message each other.'
+            : 'Off. Agents here and in the write target cannot message each other.';
+          toggle = agentSwitch(repo, false);
+        } else {
+          text = 'Read-only for the agent.';
+        }
+        copy.append(element('strong', '', 'Agent access'), element('p', '', text));
+        card.append(badge, copy);
+        if (toggle) card.append(toggle);
+        return card;
+      };
+
+      const linkList = (links) => {
+        const list = element('ul', 'pair-list');
+        links.forEach((link) => list.append(listItem(link.from + '  →  ' + link.to, link.kind + (link.note ? ' · ' + link.note : ''),
+          smallButton('Remove', 'ghost', () => mutate('removeLink', { from: link.from, to: link.to })))));
+        return list;
+      };
+
       const renderInspector = () => {
         inspectorBody.replaceChildren();
         if (!selection || !graph) {
@@ -1275,78 +1773,140 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         }
         inspectorEmpty.hidden = true;
         inspectorBody.hidden = false;
-        const head = element('div', 'inspector-head');
-        const close = smallButton('×', 'ghost', () => select(null));
+        const head = element('div', 'insp-head');
+        const title = element('div', 'insp-title');
+        const close = iconButton('close', '', 'plain icon-only', () => select(null));
         close.setAttribute('aria-label', 'Close details');
+        close.title = 'Close details';
 
         if (selection.type === 'node') {
           const repo = graph.repos.find((candidate) => candidate.name === selection.name);
           if (!repo) { select(null); return; }
-          head.append(element('h2', '', repo.name), close);
-          inspectorBody.append(head, element('p', 'hint', repo.path + (repo.purpose ? ' · ' + repo.purpose : '')));
-          const actions = element('div', 'actions');
-          if (repo.access !== 'write') {
-            if (!repo.missing) {
-              if (repo.access === 'granted') {
-                actions.append(smallButton('Revoke Edits', 'secondary', () => mutate('revoke', { name: repo.name })));
-              } else {
-                // Same choices as the sidebar's picker; the last one is remembered while the map is open.
-                const hours = element('select', 'hours-select');
-                hours.setAttribute('aria-label', 'Allow edits for');
-                [1, 2, 4, 8, 24].forEach((value) => {
-                  const option = element('option', '', value + (value === 1 ? ' hour' : ' hours'));
-                  option.value = String(value);
-                  option.selected = value === grantHours;
-                  hours.append(option);
-                });
-                hours.addEventListener('change', () => { grantHours = Number(hours.value); });
-                actions.append(hours, smallButton('Allow Edits', 'secondary', () => mutate('grant', { name: repo.name, hours: grantHours })));
-              }
-            }
-            actions.append(
-              smallButton('Make Write Target', 'ghost', () => mutate('setDefault', { name: repo.name })),
-              smallButton('Remove', 'ghost', () => mutate('remove', { name: repo.name }))
-            );
-          } else {
-            actions.append(element('span', 'hint', 'Write target: the agent edits here.'));
+          const state = repo.missing ? 'missing' : repo.access;
+          const status = element('p', 'insp-status');
+          status.dataset.repo = repo.name;
+          title.append(element('h2', '', repo.name), status);
+          head.append(avatar(repo, repo.name), title, close);
+          inspectorBody.append(head);
+          updateInspectorStatus();
+
+          // Access: the write target, or read-only with an optional grant for a few hours.
+          const access = section('Access');
+          const choice = element('div', 'segmented');
+          choice.setAttribute('role', 'radiogroup');
+          choice.setAttribute('aria-label', 'Access');
+          const writeOption = segment('pencil', 'Write target', state === 'write', 'write', () => mutate('setDefault', { name: repo.name }));
+          writeOption.disabled = repo.missing;
+          const readOption = segment('lock', 'Read-only', state === 'read' || state === 'missing', '', () => mutate('revoke', { name: repo.name }));
+          if (state === 'write') {
+            readOption.disabled = true;
+            readOption.title = 'Make another repository the write target to make this one read-only.';
           }
-          actions.append(smallButton('+ File Link', 'ghost', () => openLinkForm(repo.name, null)));
-          inspectorBody.append(actions);
+          choice.append(writeOption, readOption);
+          access.append(choice);
+          if (state === 'granted') {
+            const until = repo.grantedUntil ? new Date(repo.grantedUntil) : null;
+            const row = element('div', 'grant-row', 'Edits allowed' + (until && !isNaN(until.getTime())
+              ? ' until ' + until.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '') + '.');
+            row.append(smallButton('Revoke', 'ghost', () => mutate('revoke', { name: repo.name })));
+            access.append(row);
+          } else if (state === 'read') {
+            // Same choices as the sidebar's picker; the last one is remembered while the map is open.
+            const row = element('div', 'grant-row', 'Allow edits for');
+            const hours = element('select');
+            hours.setAttribute('aria-label', 'Allow edits for');
+            [1, 2, 4, 8, 24].forEach((value) => {
+              const option = element('option', '', value + (value === 1 ? ' hour' : ' hours'));
+              option.value = String(value);
+              option.selected = value === grantHours;
+              hours.append(option);
+            });
+            hours.addEventListener('change', () => { grantHours = Number(hours.value); });
+            row.append(hours, smallButton('Allow', 'ghost', () => mutate('grant', { name: repo.name, hours: grantHours })));
+            access.append(row);
+          }
+          access.append(agentCard(repo, state));
+          inspectorBody.append(access);
+
+          const location = section('Location');
+          const field = element('div', 'path-field');
+          const path = element('code', '', repo.path);
+          path.title = repo.path;
+          const copyPath = iconButton('copy', 'Copy', '', () => command('copyPath', repo.name));
+          copyPath.title = 'Copy the path';
+          field.append(path, copyPath);
+          const open = iconButton('folder', 'Open folder', 'ghost block', () => command('openFolder', repo.name));
+          open.title = 'Show the folder in the file explorer';
+          open.disabled = repo.missing;
+          location.append(field, open);
+          if (repo.purpose) location.append(element('p', 'hint', repo.purpose));
+          inspectorBody.append(location);
+
+          const dependencies = section('Depends on', repo.dependsOn.length);
+          const list = element('ul', 'repo-list');
+          repo.dependsOn.forEach((target) => {
+            const other = graph.repos.find((candidate) => candidate.name === target);
+            const row = element('button', 'repo-row');
+            row.type = 'button';
+            const copy = element('span', 'copy');
+            copy.append(element('strong', '', target), element('span', '', describeRepo(other)));
+            row.append(avatar(other, target), copy, icon('chevron', 16));
+            row.disabled = !other;
+            row.addEventListener('click', () => select({ type: 'node', name: target }));
+            const item = element('li');
+            item.append(row);
+            list.append(item);
+          });
+          if (repo.dependsOn.length === 0) list.append(element('p', 'hint', 'None. Drag the port on this card onto another repository.'));
+          dependencies.append(list);
+          inspectorBody.append(dependencies);
 
           const mine = graph.links.filter((link) => repoOf(link.from) === repo.name || repoOf(link.to) === repo.name);
-          inspectorBody.append(element('h3', '', 'File links (' + mine.length + ')'));
-          const list = element('ul', 'pair-list');
-          mine.forEach((link) => list.append(listItem(link.from + '  →  ' + link.to, link.kind + (link.note ? ' · ' + link.note : ''),
-            smallButton('Remove', 'ghost', () => mutate('removeLink', { from: link.from, to: link.to })))));
-          if (mine.length === 0) list.append(element('p', 'hint', 'None yet. Use + File Link.'));
-          inspectorBody.append(list);
+          const files = section('File links', mine.length);
+          if (mine.length > 0) files.append(linkList(mine));
+          files.append(iconButton('link', 'Add file link', 'ghost compact', () => openLinkForm(repo.name, null)));
+          inspectorBody.append(files);
+
+          const foot = element('div', 'insp-foot');
+          const remove = iconButton('trash', 'Remove from map', 'danger block', () => mutate('remove', { name: repo.name }));
+          remove.title = state === 'write'
+            ? 'The write target stays on the map. Make another repository the write target first.'
+            : 'Removes it from tokio.repos.json. Its files are not touched.';
+          remove.disabled = state === 'write';
+          foot.append(remove);
+          inspectorBody.append(foot);
           return;
         }
 
         const connection = connections().find((candidate) => candidate.key === selection.key);
         if (!connection) { select(null); return; }
-        head.append(element('h2', '', connection.a + ' ↔ ' + connection.b), close);
+        const badge = element('span', 'tile');
+        badge.style.setProperty('--tint', 'var(--accent-text)');
+        badge.append(icon('link', 18));
+        const status = element('p', 'insp-status', 'Connection');
+        status.style.setProperty('--status', 'var(--accent-text)');
+        title.append(element('h2', '', connection.a + ' ↔ ' + connection.b), status);
+        head.append(badge, title, close);
         inspectorBody.append(head);
 
-        inspectorBody.append(element('h3', '', 'Dependency'));
+        const dependencySection = section('Dependency');
         if (connection.dependency) {
           const dependency = connection.dependency;
           const list = element('ul', 'pair-list');
           list.append(listItem(dependency.from + ' depends on ' + dependency.to, 'merge ' + dependency.to + ' first',
             smallButton('Remove', 'ghost', () => mutate('removeDependency', dependency))));
-          inspectorBody.append(list);
+          dependencySection.append(list);
         } else {
-          inspectorBody.append(element('p', 'hint', 'None. Drag one node\\'s port onto the other to add it.'));
+          dependencySection.append(element('p', 'hint', 'None. Drag the port on one card onto the other to add it.'));
         }
+        inspectorBody.append(dependencySection);
 
-        inspectorBody.append(element('h3', '', 'File links (' + connection.links.length + ')'));
-        const links = element('ul', 'pair-list');
-        connection.links.forEach((link) => links.append(listItem(link.from + '  →  ' + link.to, link.kind + (link.note ? ' · ' + link.note : ''),
-          smallButton('Remove', 'ghost', () => mutate('removeLink', { from: link.from, to: link.to })))));
-        inspectorBody.append(links);
-        inspectorBody.append(smallButton('+ File Link', 'secondary', () => openLinkForm(connection.a, connection.b)));
+        const files = section('File links', connection.links.length);
+        if (connection.links.length > 0) files.append(linkList(connection.links));
+        files.append(iconButton('link', 'Add file link', 'ghost compact', () => openLinkForm(connection.a, connection.b)));
+        inspectorBody.append(files);
 
-        inspectorBody.append(element('h3', '', 'Detected imports (' + connection.detected.length + ')'));
+        const detectedSection = section('Detected imports', connection.detected.length);
         const detected = element('ul', 'pair-list');
         connection.detected.slice(0, 50).forEach((link) => {
           const pin = smallButton('Pin', 'ghost', () => mutate('addLink', { from: link.from, to: link.to, kind: 'type' }));
@@ -1355,7 +1915,8 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         });
         if (connection.detected.length === 0) detected.append(element('p', 'hint', 'None found from imports.'));
         if (connection.detected.length > 50) detected.append(element('p', 'hint', (connection.detected.length - 50) + ' more not shown.'));
-        inspectorBody.append(detected);
+        detectedSection.append(detected);
+        inspectorBody.append(detectedSection);
       };
 
       const fillRepoSelect = (select, chosen) => {
@@ -1433,13 +1994,11 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           addButton.setAttribute('aria-expanded', 'false');
         }
       });
-      document.getElementById('add-repo').addEventListener('click', () => {
-        addMenu.hidden = true;
-        mutate('add', {});
-      });
+      document.getElementById('add-repo').addEventListener('click', () => mutate('add', {}));
       // A selected connection or node pre-fills the link's ends.
-      document.getElementById('add-link').addEventListener('click', () => {
+      const addLink = () => {
         addMenu.hidden = true;
+        addButton.setAttribute('aria-expanded', 'false');
         const connection = selection && selection.type === 'edge' && graph
           ? connections().find((candidate) => candidate.key === selection.key)
           : null;
@@ -1448,7 +2007,9 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         } else {
           openLinkForm(selection && selection.type === 'node' ? selection.name : null, null);
         }
-      });
+      };
+      document.getElementById('add-link').addEventListener('click', addLink);
+      document.getElementById('empty-add-link').addEventListener('click', addLink);
       document.getElementById('auto-layout').addEventListener('click', () => {
         if (!graph) return;
         positions = autoLayout(graph, {});
@@ -1460,7 +2021,7 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       // Pan: drag empty space, drag with the middle button, or hold Space and drag anywhere.
       // A press on empty space that does not move clears the selection.
       viewport.addEventListener('pointerdown', (event) => {
-        const onEmpty = !event.target.closest('.node, .edge-label, .canvas-controls');
+        const onEmpty = !event.target.closest('.node, .edge-label, .panel');
         if (!(event.button === 1 || (event.button === 0 && (spaceHeld || onEmpty)))) return;
         event.preventDefault();
         capture(viewport, event.pointerId);
@@ -1502,8 +2063,50 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
       zoomLabel.addEventListener('click', () => zoomTo(1));
       document.getElementById('zoom-fit').addEventListener('click', fitView);
 
+      // Click or drag on the minimap to center the view there.
+      const panToMinimap = (event) => {
+        const rect = minimap.getBoundingClientRect();
+        const x = (event.clientX - rect.left - miniFrame.x) / miniFrame.scale + miniFrame.left;
+        const y = (event.clientY - rect.top - miniFrame.y) / miniFrame.scale + miniFrame.top;
+        pan = { x: viewport.clientWidth / 2 - x * zoom, y: viewport.clientHeight / 2 - y * zoom };
+        applyView();
+      };
+      minimap.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0 || !miniFrame) return;
+        event.preventDefault();
+        miniHeld = miniFrame;
+        capture(minimap, event.pointerId);
+        panToMinimap(event);
+        const up = () => {
+          minimap.removeEventListener('pointermove', panToMinimap);
+          minimap.removeEventListener('pointerup', up);
+          miniHeld = null;
+          drawMinimap();
+        };
+        minimap.addEventListener('pointermove', panToMinimap);
+        minimap.addEventListener('pointerup', up);
+      });
+
+      document.querySelectorAll('.legend-row').forEach((row) => {
+        const kind = row.dataset.filter;
+        row.append(icon('check', 14));
+        row.setAttribute('aria-pressed', String(shown[kind] !== false));
+        row.addEventListener('click', () => {
+          shown[kind] = !shown[kind];
+          row.setAttribute('aria-pressed', String(shown[kind]));
+          saveState();
+          drawEdges();
+        });
+      });
+
       const typing = (target) => target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA');
       document.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === 'k') {
+          event.preventDefault();
+          searchInput.focus();
+          searchInput.select();
+          return;
+        }
         if (typing(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
         if (event.key === ' ' && !event.target.closest('.node, button')) {
           spaceHeld = true;
@@ -1517,6 +2120,7 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         else if (event.key === '0') zoomTo(1);
         else if (event.key === 'f' || event.key === 'F') fitView();
         else if (event.key === 'd' || event.key === 'D') setDetailsOpen(!detailsOpen);
+        else if (event.key === '/') searchInput.focus();
         else if (event.key === 'Escape') {
           addMenu.hidden = true;
           linesPanel.hidden = true;
@@ -1582,7 +2186,11 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
         }
       });
 
-      window.addEventListener('resize', () => { if (graph) sizeBoard(); });
+      window.addEventListener('resize', () => {
+        if (!graph) return;
+        sizeBoard();
+        drawMinimap();
+      });
       applyView();
       applySettings();
 
@@ -1597,7 +2205,7 @@ function getMapHtml(cspSource: string, lottieUri: string): string {
           applyActivity(message.repos);
           return;
         }
-        if (message.type !== 'reposResult') return;
+        if (message.type !== 'reposResult' && message.type !== 'mapResult') return;
         const handler = pending.get(message.requestId);
         if (!handler) return;
         pending.delete(message.requestId);

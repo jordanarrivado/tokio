@@ -5,24 +5,17 @@
       "name": "tokio",
       "path": ".",
       "dependsOn": [
-        "hierpayroll-v3-api",
-        "hierpayroll-v3-web",
-        "Hier-Run"
+        "Hier-Run",
+        "hierpayroll-next"
       ]
-    },
-    {
-      "name": "hierpayroll-v3-api",
-      "path": "c:/laragon/www/hierpayroll-v3-api",
-      "maxFiles": 2500,
-      "dependsOn": []
-    },
-    {
-      "name": "hierpayroll-v3-web",
-      "path": "../projects/hierpayroll-v3-web"
     },
     {
       "name": "Hier-Run",
       "path": "../projects/Hier-Run"
+    },
+    {
+      "name": "hierpayroll-next",
+      "path": "../projects/hierpayroll-next"
     }
   ]
 }

@@ -100,6 +100,16 @@ test('settings written by tokio init pass the deny-rule check', async () => {
   assert.equal(deny?.level, 'ok', deny?.detail);
 });
 
+test('a registered output-hook is reported as registered', () => {
+  const checks = checkClaudeSettings(JSON.stringify({
+    hooks: {
+      PostToolUse: [{ matcher: 'Bash|PowerShell', hooks: [{ type: 'command', command: 'node D:/tokio/out/broker/cli.js output-hook' }] }]
+    }
+  }));
+  const post = checks.find((check) => check.name === 'PostToolUse hook');
+  assert.equal(post?.level, 'ok', post?.detail);
+});
+
 test('an unregistered PreToolUse hook is a warning', () => {
   const checks = checkClaudeSettings(JSON.stringify({ hooks: {} }));
   assert.ok(checks.some((check) => check.name === 'PreToolUse hook' && check.level === 'warn'));

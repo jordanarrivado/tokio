@@ -2,20 +2,16 @@
   "version": 1,
   "positions": {
     "tokio": {
-      "x": 260,
-      "y": 0
-    },
-    "hierpayroll-v3-api": {
-      "x": 84,
-      "y": 240
-    },
-    "hierpayroll-v3-web": {
-      "x": 259,
-      "y": 427
+      "x": 147,
+      "y": 68
     },
     "Hier-Run": {
-      "x": 415,
-      "y": 244
+      "x": 0,
+      "y": 304
+    },
+    "hierpayroll-next": {
+      "x": 301,
+      "y": 293
     }
   },
   "settings": {

@@ -1,6 +1,16 @@
 {
   "sessions": [
     {
+      "id": "1a77536e-b5b0-469a-9fae-dc41f2e2bb8b",
+      "areas": [
+        "VS Code panel (sidebar UI)",
+        "Messaging between repository agents",
+        "Project setup and health checks",
+        "MCP server and agent tools"
+      ],
+      "at": "2026-10-30T07:52:45.012Z"
+    },
+    {
       "id": "d31e81c1-c084-4849-8dcc-7dd4c6d2dbb4",
       "areas": [
         "Multiple repositories (catalog)",
@@ -42,15 +52,6 @@
         "Data structures and types"
       ],
       "at": "2026-10-28T06:47:03.056Z"
-    },
-    {
-      "id": "9d0a2927-cc4f-48e2-b193-679e89c59949",
-      "areas": [
-        "Architecture map",
-        "MCP server and agent tools",
-        "Repository map view (graph editor)"
-      ],
-      "at": "2026-10-28T03:50:36.109Z"
     }
   ]
 }
